@@ -20,16 +20,17 @@ pub enum Command {
     Migrate(MigrateArgs),
 }
 
+impl Command {
+    pub fn log_format(&self) -> LogFormat {
+        match self {
+            Self::Serve(args) => args.common.log_format,
+            Self::Migrate(args) => args.common.log_format,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
-pub struct ServeArgs {
-    /// Public base URL used to build short links.
-    #[arg(long, env = "TLD_BASE_URL")]
-    pub base_url: String,
-
-    /// Address to listen on.
-    #[arg(long, env = "TLD_LISTEN_ADDR", default_value = "127.0.0.1:8080")]
-    pub listen_addr: SocketAddr,
-
+pub struct CommonArgs {
     /// Directory holding the SQLite database.
     #[arg(long, env = "TLD_DATA_DIR", default_value = "./data")]
     pub data_dir: PathBuf,
@@ -40,14 +41,23 @@ pub struct ServeArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct MigrateArgs {
-    /// Directory holding the SQLite database.
-    #[arg(long, env = "TLD_DATA_DIR", default_value = "./data")]
-    pub data_dir: PathBuf,
+pub struct ServeArgs {
+    /// Public base URL used to build short links.
+    #[arg(long, env = "TLD_BASE_URL")]
+    pub base_url: String,
 
-    /// Log output format.
-    #[arg(long, env = "TLD_LOG_FORMAT", value_enum, default_value = "text")]
-    pub log_format: LogFormat,
+    /// Address to listen on.
+    #[arg(long, env = "TLD_LISTEN_ADDR", default_value = "127.0.0.1:8080")]
+    pub listen_addr: SocketAddr,
+
+    #[command(flatten)]
+    pub common: CommonArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct MigrateArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -69,24 +79,9 @@ impl Config {
         Ok(Self {
             base_url: validate_base_url(&args.base_url)?,
             listen_addr: args.listen_addr,
-            data_dir: args.data_dir,
-            log_format: args.log_format,
+            data_dir: args.common.data_dir,
+            log_format: args.common.log_format,
         })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MigrateConfig {
-    pub data_dir: PathBuf,
-    pub log_format: LogFormat,
-}
-
-impl MigrateConfig {
-    pub fn from_args(args: MigrateArgs) -> Self {
-        Self {
-            data_dir: args.data_dir,
-            log_format: args.log_format,
-        }
     }
 }
 
@@ -98,9 +93,6 @@ pub fn validate_base_url(value: &str) -> Result<Url> {
     if url.host_str().is_none() {
         bail!("TLD_BASE_URL must include a host");
     }
-    if url.query().is_some() || url.fragment().is_some() {
-        bail!("TLD_BASE_URL must not include a query or fragment");
-    }
     Ok(url)
 }
 
@@ -109,20 +101,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_http_and_https_base_urls() {
+    fn accepts_absolute_http_and_https_base_urls() {
         assert!(validate_base_url("http://localhost:8080").is_ok());
         assert!(validate_base_url("https://tld.example.com").is_ok());
+        assert!(validate_base_url("https://example.com/?x=1").is_ok());
+        assert!(validate_base_url("https://example.com/#x").is_ok());
     }
 
     #[test]
     fn rejects_non_http_base_urls() {
         assert!(validate_base_url("ftp://example.com").is_err());
         assert!(validate_base_url("not a url").is_err());
-    }
-
-    #[test]
-    fn rejects_base_urls_with_query_or_fragment() {
-        assert!(validate_base_url("https://example.com/?a=1").is_err());
-        assert!(validate_base_url("https://example.com/#x").is_err());
     }
 }

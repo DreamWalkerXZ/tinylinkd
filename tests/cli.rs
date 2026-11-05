@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -7,12 +8,16 @@ fn tld() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tld"))
 }
 
+fn tld_command(args: &[&str], data_dir: &Path) -> Command {
+    let mut command = tld();
+    command.args(args).env("TLD_DATA_DIR", data_dir);
+    command
+}
+
 #[test]
 fn serve_fails_without_base_url() {
     let dir = TempDir::new().expect("temp dir");
-    let output = tld()
-        .arg("serve")
-        .env("TLD_DATA_DIR", dir.path())
+    let output = tld_command(&["serve"], dir.path())
         .env_remove("TLD_BASE_URL")
         .output()
         .expect("run tld");
@@ -28,10 +33,8 @@ fn serve_fails_without_base_url() {
 #[test]
 fn serve_rejects_non_http_base_url() {
     let dir = TempDir::new().expect("temp dir");
-    let output = tld()
-        .arg("serve")
+    let output = tld_command(&["serve"], dir.path())
         .env("TLD_BASE_URL", "ftp://example.com")
-        .env("TLD_DATA_DIR", dir.path())
         .output()
         .expect("run tld");
 
@@ -41,11 +44,30 @@ fn serve_rejects_non_http_base_url() {
 }
 
 #[test]
+fn fatal_errors_follow_json_log_format() {
+    let dir = TempDir::new().expect("temp dir");
+    let output = tld_command(&["serve"], dir.path())
+        .env("TLD_BASE_URL", "ftp://example.com")
+        .env("TLD_LOG_FORMAT", "json")
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("run tld");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("log line");
+    let json: serde_json::Value = serde_json::from_str(line).expect("json fatal log");
+    assert!(json.get("level").is_some());
+    assert!(stderr.contains("http or https"));
+}
+
+#[test]
 fn migrate_creates_the_database_and_applies_migrations() {
     let dir = TempDir::new().expect("temp dir");
-    let output = tld()
-        .arg("migrate")
-        .env("TLD_DATA_DIR", dir.path())
+    let output = tld_command(&["migrate"], dir.path())
         .output()
         .expect("run tld");
 
@@ -60,9 +82,7 @@ fn migrate_creates_the_database_and_applies_migrations() {
 #[test]
 fn migrate_emits_json_logs_when_configured() {
     let dir = TempDir::new().expect("temp dir");
-    let output = tld()
-        .arg("migrate")
-        .env("TLD_DATA_DIR", dir.path())
+    let output = tld_command(&["migrate"], dir.path())
         .env("TLD_LOG_FORMAT", "json")
         .env("RUST_LOG", "info")
         .output()
@@ -93,11 +113,9 @@ fn serve_shuts_down_gracefully_on_sigterm() {
         listener.local_addr().expect("local addr").port()
     };
 
-    let mut child = tld()
-        .arg("serve")
+    let mut child = tld_command(&["serve"], dir.path())
         .env("TLD_BASE_URL", format!("http://127.0.0.1:{port}"))
         .env("TLD_LISTEN_ADDR", format!("127.0.0.1:{port}"))
-        .env("TLD_DATA_DIR", dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

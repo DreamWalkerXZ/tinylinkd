@@ -19,27 +19,46 @@ pub fn build_router(db: Database) -> Router {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum HealthStatus {
+    Ok,
+    Error,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DatabaseStatus {
+    Ok,
+    Unavailable,
+}
+
+#[derive(Serialize)]
 struct HealthResponse {
-    status: &'static str,
+    status: HealthStatus,
     version: &'static str,
-    database: &'static str,
+    database: DatabaseStatus,
 }
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let (status, status_text, database) = match state.db.ping().await {
-        Ok(()) => (StatusCode::OK, "ok", "ok"),
+    match state.db.ping().await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(HealthResponse {
+                status: HealthStatus::Ok,
+                version: env!("CARGO_PKG_VERSION"),
+                database: DatabaseStatus::Ok,
+            }),
+        ),
         Err(error) => {
             tracing::error!(error = %error, "database health check failed");
-            (StatusCode::SERVICE_UNAVAILABLE, "error", "unavailable")
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HealthResponse {
+                    status: HealthStatus::Error,
+                    version: env!("CARGO_PKG_VERSION"),
+                    database: DatabaseStatus::Unavailable,
+                }),
+            )
         }
-    };
-
-    (
-        status,
-        Json(HealthResponse {
-            status: status_text,
-            version: env!("CARGO_PKG_VERSION"),
-            database,
-        }),
-    )
+    }
 }

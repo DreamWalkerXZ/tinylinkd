@@ -6,17 +6,23 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use tinylinkd::app::build_router;
-use tinylinkd::config::{Cli, Command, Config, MigrateConfig};
+use tinylinkd::config::{Cli, Command, Config};
 use tinylinkd::db::Database;
 use tinylinkd::logging;
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    if let Err(error) = logging::init(cli.command.log_format()) {
+        eprintln!("error: {error:#}");
+        return ExitCode::FAILURE;
+    }
+
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error:#}");
+            tracing::error!(error = %error, "fatal error");
             ExitCode::FAILURE
         }
     }
@@ -26,13 +32,10 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Serve(args) => {
             let config = Config::from_args(args)?;
-            logging::init(config.log_format)?;
             serve(config).await
         }
         Command::Migrate(args) => {
-            let config = MigrateConfig::from_args(args);
-            logging::init(config.log_format)?;
-            let db = Database::connect(&config.data_dir).await?;
+            let db = Database::connect(&args.common.data_dir).await?;
             info!(path = %db.path().display(), "migrations applied");
             Ok(())
         }

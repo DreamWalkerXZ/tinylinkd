@@ -1,3 +1,4 @@
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -5,30 +6,36 @@ use tinylinkd::app::build_router;
 use tinylinkd::db::Database;
 use tower::ServiceExt;
 
-#[tokio::test]
-async fn health_returns_ok_with_database_check() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let db = Database::connect(dir.path()).await.expect("database");
-    let app = build_router(db);
-
+async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
-                .uri("/_/health")
+                .uri(uri)
                 .body(Body::empty())
                 .expect("request"),
         )
         .await
         .expect("response");
-
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response
         .into_body()
         .collect()
         .await
         .expect("body")
         .to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    (status, serde_json::from_slice(&body).expect("json"))
+}
+
+#[tokio::test]
+async fn health_returns_ok_with_database_check() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db = Database::connect(dir.path()).await.expect("database");
+    let app = build_router(db);
+
+    let (status, json) = get_json(&app, "/_/health").await;
+
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(json["status"], "ok");
     assert_eq!(json["database"], "ok");
     assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
@@ -38,28 +45,31 @@ async fn health_returns_ok_with_database_check() {
 async fn health_returns_503_when_database_is_unavailable() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db = Database::connect(dir.path()).await.expect("database");
-    let pool = db.pool().clone();
+    let pool = db.read_pool().clone();
     let app = build_router(db);
     pool.close().await;
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/_/health")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
+    let (status, json) = get_json(&app, "/_/health").await;
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["database"], "unavailable");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn health_returns_503_when_database_file_is_removed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db = Database::connect(dir.path()).await.expect("database");
+    let app = build_router(db);
+
+    std::fs::remove_file(dir.path().join("tinylinkd.db")).expect("remove database");
+    let _ = std::fs::remove_file(dir.path().join("tinylinkd.db-wal"));
+    let _ = std::fs::remove_file(dir.path().join("tinylinkd.db-shm"));
+
+    let (status, json) = get_json(&app, "/_/health").await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(json["status"], "error");
     assert_eq!(json["database"], "unavailable");
 }
@@ -69,19 +79,18 @@ async fn connect_applies_embedded_migrations() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db = Database::connect(dir.path()).await.expect("database");
 
-    let schema_version: String =
-        sqlx::query_scalar("SELECT value FROM schema_meta WHERE key = 'schema_version'")
-            .fetch_one(db.pool())
-            .await
-            .expect("schema_meta");
-    assert_eq!(schema_version, "1");
+    let settings_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings")
+        .fetch_one(db.read_pool())
+        .await
+        .expect("settings table");
+    assert_eq!(settings_count, 0);
 
     let applied: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 1")
-            .fetch_one(db.pool())
+            .fetch_one(db.read_pool())
             .await
             .expect("migrations");
-    assert!(applied >= 1);
+    assert_eq!(applied, 1);
 }
 
 #[tokio::test]
@@ -90,13 +99,13 @@ async fn database_enables_wal_and_foreign_keys() {
     let db = Database::connect(dir.path()).await.expect("database");
 
     let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
-        .fetch_one(db.pool())
+        .fetch_one(db.read_pool())
         .await
         .expect("journal_mode");
     assert_eq!(journal_mode.to_lowercase(), "wal");
 
     let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
-        .fetch_one(db.pool())
+        .fetch_one(db.read_pool())
         .await
         .expect("foreign_keys");
     assert_eq!(foreign_keys, 1);
