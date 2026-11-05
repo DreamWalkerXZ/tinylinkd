@@ -13,6 +13,7 @@ use tinylinkd::bootstrap::{BootstrapAdmin, bootstrap_admin};
 use tinylinkd::config::{AdminCommand, Cli, Command, Config, TokenCommand};
 use tinylinkd::db::Database;
 use tinylinkd::logging;
+use tinylinkd::secrets;
 use tinylinkd::tokens;
 use tinylinkd::users::{self, NewUser, Role};
 
@@ -120,6 +121,11 @@ fn read_password() -> Result<String> {
 async fn serve(config: Config) -> Result<()> {
     let db = Database::connect(&config.data_dir).await?;
     bootstrap_admin(&db, BootstrapAdmin::from_env()).await?;
+    // Generate the HMAC signing key on the first run and persist it in the
+    // `secrets` table so unlock cookies survive restarts and backups.
+    secrets::unlock_cookie_signing_key(&db)
+        .await
+        .context("failed to initialize the password-unlock signing key")?;
     analytics::spawn_click_retention(db.clone());
     let app = build_router_with_config(
         db,

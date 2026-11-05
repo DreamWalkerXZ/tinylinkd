@@ -30,6 +30,10 @@ impl Database {
             .await
             .context("failed to run database migrations")?;
 
+        crate::settings::ensure_defaults(&write_pool)
+            .await
+            .context("failed to insert the default Instance settings")?;
+
         let read_pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(connect_options(&path))

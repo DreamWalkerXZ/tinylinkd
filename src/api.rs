@@ -17,6 +17,7 @@ use crate::invites;
 use crate::links::{self, LinkStatus};
 use crate::password_resets;
 use crate::problems::ProblemDetails;
+use crate::settings;
 use crate::timeutil;
 use crate::tokens;
 use crate::users::Role;
@@ -43,6 +44,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/_/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/_/api/v1/tokens/{id}", delete(revoke_token))
+        .route(
+            "/_/api/v1/settings",
+            get(get_settings).patch(update_settings),
+        )
         .route("/_/api/v1/links", get(list_links).post(create_link))
         .route(
             "/_/api/v1/links/{id}",
@@ -96,6 +101,8 @@ pub fn router() -> Router<AppState> {
         list_tokens,
         create_token,
         revoke_token,
+        get_settings,
+        update_settings,
         list_invites,
         create_invite,
         revoke_invite,
@@ -123,6 +130,8 @@ pub fn router() -> Router<AppState> {
         CreatedTokenResponse,
         TokenListResponse,
         CreateTokenRequest,
+        SettingsResponse,
+        UpdateSettingsRequest,
         InviteResponse,
         CreatedInviteResponse,
         InviteListResponse,
@@ -1218,7 +1227,7 @@ async fn list_link_clicks(
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DayCount {
-    /// The UTC calendar date, as `YYYY-MM-DD`.
+    /// The calendar date in the Instance timezone, as `YYYY-MM-DD`.
     pub date: String,
     pub total_clicks: i64,
     pub human_clicks: i64,
@@ -1234,7 +1243,8 @@ pub struct LinkStatsResponse {
     pub bot_clicks: i64,
     /// Clicks by device, including bot-device Clicks.
     pub by_device: BTreeMap<String, i64>,
-    /// Clicks by UTC calendar day, oldest first. Only days with Clicks appear.
+    /// Clicks by calendar day in the Instance timezone, oldest first. Only
+    /// days with Clicks appear.
     pub by_day: Vec<DayCount>,
 }
 
@@ -1318,7 +1328,10 @@ async fn link_stats(
         from: parse_time_bound(query.from.as_deref(), "from", uri.path())?,
         to: parse_time_bound(query.to.as_deref(), "to", uri.path())?,
     };
-    let stats = analytics::click_stats(&state.db, link_id, range)
+    let instance_settings = settings::load(&state.db)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    let stats = analytics::click_stats(&state.db, link_id, range, &instance_settings.timezone)
         .await
         .map_err(|error| error.into_problem(uri.path()))?;
     Ok(Json(LinkStatsResponse::from(stats)))
@@ -1435,6 +1448,97 @@ async fn revoke_token(
         .await
         .map_err(|error| error.into_problem(uri.path()))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The mutable Instance settings. The HMAC signing key and the `secrets`
+/// table are never part of this response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SettingsResponse {
+    pub instance_name: String,
+    /// The IANA timezone used for daily Click buckets and display.
+    pub timezone: String,
+    pub click_retention_days: i64,
+    pub password_unlock_ttl_seconds: i64,
+}
+
+impl From<settings::InstanceSettings> for SettingsResponse {
+    fn from(settings: settings::InstanceSettings) -> Self {
+        Self {
+            instance_name: settings.instance_name,
+            timezone: settings.timezone,
+            click_retention_days: settings.click_retention_days,
+            password_unlock_ttl_seconds: settings.password_unlock_ttl_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateSettingsRequest {
+    /// A non-empty Instance name.
+    pub instance_name: Option<String>,
+    /// An IANA timezone name, for example `Europe/London`.
+    pub timezone: Option<String>,
+    /// The Click retention window in days. Must be positive.
+    pub click_retention_days: Option<i64>,
+    /// The password-unlock cookie lifetime in seconds. Must be positive.
+    pub password_unlock_ttl_seconds: Option<i64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/_/api/v1/settings",
+    tag = "settings",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "The mutable Instance settings.", body = SettingsResponse),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn get_settings(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+) -> Result<Json<SettingsResponse>, ProblemDetails> {
+    let settings = settings::load(&state.db)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(Json(SettingsResponse::from(settings)))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/_/api/v1/settings",
+    tag = "settings",
+    security(("bearerAuth" = [])),
+    request_body = UpdateSettingsRequest,
+    responses(
+        (status = 200, description = "The complete updated Instance settings.", body = SettingsResponse),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "A setting is invalid or the body is malformed.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn update_settings(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+    payload: Result<Json<UpdateSettingsRequest>, JsonRejection>,
+) -> Result<Json<SettingsResponse>, ProblemDetails> {
+    let Json(payload) =
+        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let settings = settings::update(
+        &state.db,
+        settings::SettingsChanges {
+            instance_name: payload.instance_name,
+            timezone: payload.timezone,
+            click_retention_days: payload.click_retention_days,
+            password_unlock_ttl_seconds: payload.password_unlock_ttl_seconds,
+        },
+    )
+    .await
+    .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(Json(SettingsResponse::from(settings)))
 }
 
 #[derive(Debug, Serialize, ToSchema)]

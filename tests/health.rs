@@ -79,11 +79,20 @@ async fn connect_applies_embedded_migrations() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db = Database::connect(dir.path()).await.expect("database");
 
-    let settings_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings")
-        .fetch_one(db.read_pool())
+    let setting_keys: Vec<String> = sqlx::query_scalar("SELECT key FROM settings ORDER BY key")
+        .fetch_all(db.read_pool())
         .await
         .expect("settings table");
-    assert_eq!(settings_count, 0);
+    assert_eq!(
+        setting_keys,
+        [
+            "click_retention_days",
+            "instance_name",
+            "password_unlock_ttl_seconds",
+            "timezone"
+        ],
+        "connect must insert the default Instance settings"
+    );
 
     let applied: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 1")

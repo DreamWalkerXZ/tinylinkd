@@ -261,7 +261,7 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
             "type": "integer"
           },
           "date": {
-            "description": "The UTC calendar date, as `YYYY-MM-DD`.",
+            "description": "The calendar date in the Instance timezone, as `YYYY-MM-DD`.",
             "type": "string"
           },
           "human_clicks": {
@@ -491,7 +491,7 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
             "type": "integer"
           },
           "by_day": {
-            "description": "Clicks by UTC calendar day, oldest first. Only days with Clicks appear.",
+            "description": "Clicks by calendar day in the Instance timezone, oldest first. Only\ndays with Clicks appear.",
             "items": {
               "$ref": "#/components/schemas/DayCount"
             },
@@ -600,6 +600,33 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
           "detail",
           "instance",
           "code"
+        ],
+        "type": "object"
+      },
+      "SettingsResponse": {
+        "description": "The mutable Instance settings. The HMAC signing key and the `secrets`\ntable are never part of this response.",
+        "properties": {
+          "click_retention_days": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "instance_name": {
+            "type": "string"
+          },
+          "password_unlock_ttl_seconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "timezone": {
+            "description": "The IANA timezone used for daily Click buckets and display.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance_name",
+          "timezone",
+          "click_retention_days",
+          "password_unlock_ttl_seconds"
         ],
         "type": "object"
       },
@@ -719,6 +746,41 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
         "properties": {
           "email": {
             "description": "The new optional email. Omit it to keep the current email; send `null`\nor an empty string to clear it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpdateSettingsRequest": {
+        "properties": {
+          "click_retention_days": {
+            "description": "The Click retention window in days. Must be positive.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "instance_name": {
+            "description": "A non-empty Instance name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password_unlock_ttl_seconds": {
+            "description": "The password-unlock cookie lifetime in seconds. Must be positive.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "timezone": {
+            "description": "An IANA timezone name, for example `Europe/London`.",
             "type": [
               "string",
               "null"
@@ -2074,6 +2136,114 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
         },
         "tags": [
           "password-resets"
+        ]
+      }
+    },
+    "/_/api/v1/settings": {
+      "get": {
+        "operationId": "get_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "The mutable Instance settings."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "settings"
+        ]
+      },
+      "patch": {
+        "operationId": "update_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "The complete updated Instance settings."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A setting is invalid or the body is malformed."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "settings"
         ]
       }
     },

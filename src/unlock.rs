@@ -10,9 +10,10 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use time::OffsetDateTime;
 
-/// How long a password unlock lasts by default. T10 makes this an Instance
-/// setting; until then every unlock cookie uses this TTL.
-pub const UNLOCK_COOKIE_TTL_SECONDS: i64 = 3600;
+/// The default lifetime of a password unlock. The Instance's
+/// `password_unlock_ttl_seconds` setting takes precedence; this remains the
+/// documented default.
+pub const UNLOCK_COOKIE_TTL_SECONDS: i64 = crate::settings::DEFAULT_PASSWORD_UNLOCK_TTL_SECONDS;
 
 /// Failed password attempts allowed per IP and Link within
 /// [`PASSWORD_FAILURE_WINDOW`] before further attempts are rejected.
@@ -56,9 +57,9 @@ pub fn issue_cookie(
     link_id: i64,
     password_version: i64,
     now: OffsetDateTime,
+    ttl_seconds: i64,
 ) -> String {
-    let expires_at_unix =
-        (now + time::Duration::seconds(UNLOCK_COOKIE_TTL_SECONDS)).unix_timestamp();
+    let expires_at_unix = now.unix_timestamp().saturating_add(ttl_seconds);
     let payload = payload(link_id, password_version, expires_at_unix);
     let signature = URL_SAFE_NO_PAD.encode(sign(secret, payload.as_bytes()));
     format!("{payload}.{signature}")
@@ -116,9 +117,9 @@ pub fn cookie_is_valid(
 }
 
 /// The `Set-Cookie` header value that stores an unlock cookie.
-pub fn set_cookie_header(link_id: i64, value: &str, secure: bool) -> String {
+pub fn set_cookie_header(link_id: i64, value: &str, secure: bool, max_age_seconds: i64) -> String {
     let mut header = format!(
-        "{}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={UNLOCK_COOKIE_TTL_SECONDS}",
+        "{}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age_seconds}",
         cookie_name(link_id)
     );
     if secure {
@@ -216,22 +217,29 @@ mod tests {
 
     #[test]
     fn issued_cookies_verify_for_the_same_link_and_version() {
-        let cookie = issue_cookie(SECRET, 7, 3, now());
+        let cookie = issue_cookie(SECRET, 7, 3, now(), UNLOCK_COOKIE_TTL_SECONDS);
         assert!(cookie_is_valid(SECRET, &cookie, 7, 3, now()));
         assert!(!cookie_is_valid(SECRET, &cookie, 8, 3, now()));
         assert!(!cookie_is_valid(SECRET, &cookie, 7, 4, now()));
     }
 
     #[test]
-    fn cookies_expire_after_the_ttl() {
-        let cookie = issue_cookie(SECRET, 7, 3, now());
-        let later = now() + time::Duration::seconds(UNLOCK_COOKIE_TTL_SECONDS + 1);
+    fn cookies_expire_after_the_configured_ttl() {
+        let cookie = issue_cookie(SECRET, 7, 3, now(), 60);
+        assert!(cookie_is_valid(
+            SECRET,
+            &cookie,
+            7,
+            3,
+            now() + time::Duration::seconds(59)
+        ));
+        let later = now() + time::Duration::seconds(61);
         assert!(!cookie_is_valid(SECRET, &cookie, 7, 3, later));
     }
 
     #[test]
     fn tampered_or_foreign_cookies_are_rejected() {
-        let cookie = issue_cookie(SECRET, 7, 3, now());
+        let cookie = issue_cookie(SECRET, 7, 3, now(), UNLOCK_COOKIE_TTL_SECONDS);
         assert!(!cookie_is_valid(b"another-secret", &cookie, 7, 3, now()));
 
         let mut parts: Vec<&str> = cookie.split('.').collect();
