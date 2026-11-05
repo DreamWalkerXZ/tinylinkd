@@ -19,12 +19,17 @@ async fn openapi_document_covers_auth_and_token_routes() {
     assert_eq!(document["openapi"], "3.1.0");
     for path in [
         "/_/api/v1/me",
+        "/_/api/v1/me/password",
         "/_/api/v1/tokens",
         "/_/api/v1/tokens/{id}",
         "/_/api/v1/links",
         "/_/api/v1/links/{id}",
         "/_/api/v1/links/{id}/clicks",
         "/_/api/v1/links/{id}/stats",
+        "/_/api/v1/users",
+        "/_/api/v1/users/{id}",
+        "/_/api/v1/users/{id}/tokens",
+        "/_/api/v1/users/{id}/tokens/{token_id}",
         "/_/api/v1/invites",
         "/_/api/v1/invites/{id}",
         "/_/api/v1/invites/{token}",
@@ -39,6 +44,16 @@ async fn openapi_document_covers_auth_and_token_routes() {
         );
     }
     assert!(document["paths"]["/_/api/v1/me"]["get"].is_object());
+    assert!(document["paths"]["/_/api/v1/me"]["patch"].is_object());
+    assert!(document["paths"]["/_/api/v1/me"]["delete"].is_object());
+    assert!(document["paths"]["/_/api/v1/me/password"]["post"].is_object());
+    assert!(document["paths"]["/_/api/v1/users"]["get"].is_object());
+    assert!(document["paths"]["/_/api/v1/users/{id}"]["get"].is_object());
+    assert!(document["paths"]["/_/api/v1/users/{id}"]["patch"].is_object());
+    assert!(document["paths"]["/_/api/v1/users/{id}"]["delete"].is_object());
+    assert!(document["paths"]["/_/api/v1/users/{id}/tokens"]["get"].is_object());
+    assert!(document["paths"]["/_/api/v1/users/{id}/tokens"]["post"].is_object());
+    assert!(document["paths"]["/_/api/v1/users/{id}/tokens/{token_id}"]["delete"].is_object());
     assert!(document["paths"]["/_/api/v1/tokens"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/tokens"]["post"].is_object());
     assert!(document["paths"]["/_/api/v1/tokens/{id}"]["delete"].is_object());
@@ -84,11 +99,23 @@ async fn openapi_document_covers_auth_and_token_routes() {
             .is_some(),
         "missing UpdateLinkRequest schema: {document}"
     );
+    assert!(
+        document["components"]["schemas"]["UpdateLinkRequest"]["properties"]
+            .get("owner_id")
+            .is_some(),
+        "UpdateLinkRequest must accept owner_id: {document}"
+    );
     for schema in [
         "ClickResponse",
         "ClickListResponse",
         "LinkStatsResponse",
         "DayCount",
+        "UserProfile",
+        "UserListResponse",
+        "UpdateUserRequest",
+        "UpdateProfileRequest",
+        "ChangePasswordRequest",
+        "DeleteAccountRequest",
     ] {
         assert!(
             document["components"]["schemas"].get(schema).is_some(),

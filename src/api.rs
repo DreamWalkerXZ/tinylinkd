@@ -26,7 +26,21 @@ pub const MAX_PAGE_LIMIT: i64 = 100;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/_/api/v1/me", get(me))
+        .route("/_/api/v1/me", get(me).patch(update_me).delete(delete_me))
+        .route("/_/api/v1/me/password", post(change_password))
+        .route("/_/api/v1/users", get(list_users))
+        .route(
+            "/_/api/v1/users/{id}",
+            get(get_user).patch(update_user).delete(delete_user),
+        )
+        .route(
+            "/_/api/v1/users/{id}/tokens",
+            get(list_user_tokens).post(create_user_token),
+        )
+        .route(
+            "/_/api/v1/users/{id}/tokens/{token_id}",
+            delete(revoke_user_token),
+        )
         .route("/_/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/_/api/v1/tokens/{id}", delete(revoke_token))
         .route("/_/api/v1/links", get(list_links).post(create_link))
@@ -69,6 +83,16 @@ pub fn router() -> Router<AppState> {
     ),
     paths(
         me,
+        update_me,
+        change_password,
+        delete_me,
+        list_users,
+        get_user,
+        update_user,
+        delete_user,
+        list_user_tokens,
+        create_user_token,
+        revoke_user_token,
         list_tokens,
         create_token,
         revoke_token,
@@ -90,6 +114,11 @@ pub fn router() -> Router<AppState> {
     ),
     components(schemas(
         UserProfile,
+        UpdateProfileRequest,
+        ChangePasswordRequest,
+        DeleteAccountRequest,
+        UserListResponse,
+        UpdateUserRequest,
         TokenResponse,
         CreatedTokenResponse,
         TokenListResponse,
@@ -144,6 +173,7 @@ pub struct UserProfile {
     pub username: String,
     pub email: Option<String>,
     pub role: String,
+    pub disabled: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -161,6 +191,7 @@ impl From<crate::users::User> for UserProfile {
             username: user.username,
             email: user.email,
             role: user.role.as_str().to_string(),
+            disabled: user.disabled_at.is_some(),
             created_at: user.created_at,
             updated_at: user.updated_at,
         }
@@ -179,6 +210,399 @@ impl From<crate::users::User> for UserProfile {
 )]
 async fn me(user: CurrentUser) -> Json<UserProfile> {
     Json(UserProfile::from(user))
+}
+
+/// Distinguish an omitted field from an explicit `null` in a PATCH body.
+fn deserialize_optional_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateProfileRequest {
+    /// The new optional email. Omit it to keep the current email; send `null`
+    /// or an empty string to clear it.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[schema(value_type = Option<String>)]
+    pub email: Option<Option<String>>,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/_/api/v1/me",
+    tag = "auth",
+    security(("bearerAuth" = [])),
+    request_body = UpdateProfileRequest,
+    responses(
+        (status = 200, description = "The updated current User profile.", body = UserProfile),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 409, description = "The email is already in use.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "The email is invalid.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn update_me(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    uri: Uri,
+    payload: Result<Json<UpdateProfileRequest>, JsonRejection>,
+) -> Result<Json<UserProfile>, ProblemDetails> {
+    let Json(payload) =
+        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let updated = crate::users::update_email(
+        &state.db,
+        user.user.id,
+        crate::users::EmailChange {
+            email: payload.email,
+        },
+    )
+    .await
+    .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(Json(UserProfile::from(updated)))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/_/api/v1/me/password",
+    tag = "auth",
+    security(("bearerAuth" = [])),
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 204, description = "The password was changed."),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token, or the current password is incorrect.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "The new password is invalid or the body is malformed.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn change_password(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    uri: Uri,
+    payload: Result<Json<ChangePasswordRequest>, JsonRejection>,
+) -> Result<StatusCode, ProblemDetails> {
+    let Json(payload) =
+        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    crate::users::change_password(
+        &state.db,
+        user.user.id,
+        &payload.current_password,
+        &payload.new_password,
+    )
+    .await
+    .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DeleteAccountRequest {
+    /// The current password. `current_password` is accepted as an alias.
+    #[serde(alias = "current_password")]
+    pub password: String,
+}
+
+#[utoipa::path(
+    delete,
+    path = "/_/api/v1/me",
+    tag = "auth",
+    security(("bearerAuth" = [])),
+    request_body = DeleteAccountRequest,
+    responses(
+        (status = 204, description = "The current User was deleted."),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token, or the password is incorrect.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 409, description = "The User owns Links and cannot be deleted.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "The password is missing or the body is malformed.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn delete_me(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    uri: Uri,
+    payload: Result<Json<DeleteAccountRequest>, JsonRejection>,
+) -> Result<StatusCode, ProblemDetails> {
+    let Json(payload) =
+        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    crate::users::delete_own_account(&state.db, user.user.id, &payload.password)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserListResponse {
+    pub items: Vec<UserProfile>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/_/api/v1/users",
+    tag = "users",
+    security(("bearerAuth" = [])),
+    params(
+        ("limit" = Option<i64>, Query, description = "Maximum number of Users to return (default 20, maximum 100)."),
+        ("offset" = Option<i64>, Query, description = "Number of Users to skip.")
+    ),
+    responses(
+        (status = 200, description = "All Users with their role and disabled status.", body = UserListResponse),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid pagination parameters.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn list_users(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+    query: Result<Query<Pagination>, QueryRejection>,
+) -> Result<Json<UserListResponse>, ProblemDetails> {
+    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
+    let (items, total) = crate::users::list_users(&state.db, limit, offset)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(Json(UserListResponse {
+        items: items.into_iter().map(UserProfile::from).collect(),
+        total,
+        limit,
+        offset,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/_/api/v1/users/{id}",
+    tag = "users",
+    security(("bearerAuth" = [])),
+    params(("id" = i64, Path, description = "The User id.")),
+    responses(
+        (status = 200, description = "The User.", body = UserProfile),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such User.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn get_user(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+    path: Result<Path<i64>, PathRejection>,
+) -> Result<Json<UserProfile>, ProblemDetails> {
+    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let user = crate::users::find_by_id(&state.db, user_id)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?
+        .ok_or_else(|| ProblemDetails::not_found("User not found.", uri.path()))?;
+    Ok(Json(UserProfile::from(user)))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateUserRequest {
+    /// The new optional email. Omit it to keep the current email; send `null`
+    /// or an empty string to clear it.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[schema(value_type = Option<String>)]
+    pub email: Option<Option<String>>,
+    /// When true, disable the User and revoke all of their API tokens. When
+    /// false, re-enable the User; revoked tokens are never restored.
+    pub disabled: Option<bool>,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/_/api/v1/users/{id}",
+    tag = "users",
+    security(("bearerAuth" = [])),
+    params(("id" = i64, Path, description = "The User id.")),
+    request_body = UpdateUserRequest,
+    responses(
+        (status = 200, description = "The User was updated.", body = UserProfile),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such User.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 409, description = "The email is already in use.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "The email is invalid or the body is malformed.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn update_user(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+    path: Result<Path<i64>, PathRejection>,
+    payload: Result<Json<UpdateUserRequest>, JsonRejection>,
+) -> Result<Json<UserProfile>, ProblemDetails> {
+    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Json(payload) =
+        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let user = crate::users::update_user(
+        &state.db,
+        user_id,
+        crate::users::UserChanges {
+            email: payload.email,
+            disabled: payload.disabled,
+        },
+    )
+    .await
+    .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(Json(UserProfile::from(user)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/_/api/v1/users/{id}",
+    tag = "users",
+    security(("bearerAuth" = [])),
+    params(("id" = i64, Path, description = "The User id.")),
+    responses(
+        (status = 204, description = "The User was deleted."),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such User.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 409, description = "The User owns Links and cannot be deleted.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn delete_user(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+    path: Result<Path<i64>, PathRejection>,
+) -> Result<StatusCode, ProblemDetails> {
+    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    crate::users::delete_user(&state.db, user_id)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    get,
+    path = "/_/api/v1/users/{id}/tokens",
+    tag = "users",
+    security(("bearerAuth" = [])),
+    params(
+        ("id" = i64, Path, description = "The User id."),
+        ("limit" = Option<i64>, Query, description = "Maximum number of API tokens to return (default 20, maximum 100)."),
+        ("offset" = Option<i64>, Query, description = "Number of API tokens to skip.")
+    ),
+    responses(
+        (status = 200, description = "The User's API tokens. Plaintext tokens are never listed.", body = TokenListResponse),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such User.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid pagination parameters.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn list_user_tokens(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+    path: Result<Path<i64>, PathRejection>,
+    query: Result<Query<Pagination>, QueryRejection>,
+) -> Result<Json<TokenListResponse>, ProblemDetails> {
+    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
+    let exists = crate::users::find_by_id(&state.db, user_id)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?
+        .is_some();
+    if !exists {
+        return Err(ProblemDetails::not_found("User not found.", uri.path()));
+    }
+    let (items, total) = tokens::list_tokens(&state.db, user_id, limit, offset)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(Json(TokenListResponse {
+        items: items.into_iter().map(TokenResponse::from).collect(),
+        total,
+        limit,
+        offset,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/_/api/v1/users/{id}/tokens",
+    tag = "users",
+    security(("bearerAuth" = [])),
+    params(("id" = i64, Path, description = "The User id.")),
+    request_body = CreateTokenRequest,
+    responses(
+        (status = 201, description = "API token created for the User. The plaintext `token` is returned only in this response.", body = CreatedTokenResponse),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such User.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 409, description = "The User is disabled.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "The token name or expiry is invalid.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn create_user_token(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+    path: Result<Path<i64>, PathRejection>,
+    payload: Result<Json<CreateTokenRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<CreatedTokenResponse>), ProblemDetails> {
+    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Json(payload) =
+        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let created = tokens::create_token(
+        &state.db,
+        user_id,
+        &payload.name,
+        payload.expires_at.as_deref(),
+    )
+    .await
+    .map_err(|error| error.into_problem(uri.path()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreatedTokenResponse::from(created)),
+    ))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/_/api/v1/users/{id}/tokens/{token_id}",
+    tag = "users",
+    security(("bearerAuth" = [])),
+    params(
+        ("id" = i64, Path, description = "The User id."),
+        ("token_id" = i64, Path, description = "The API token id.")
+    ),
+    responses(
+        (status = 204, description = "The API token was revoked."),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such User or API token for that User.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn revoke_user_token(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+    path: Result<Path<(i64, i64)>, PathRejection>,
+) -> Result<StatusCode, ProblemDetails> {
+    let Path((user_id, token_id)) =
+        path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let exists = crate::users::find_by_id(&state.db, user_id)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?
+        .is_some();
+    if !exists {
+        return Err(ProblemDetails::not_found("User not found.", uri.path()));
+    }
+    tokens::revoke_token(&state.db, user_id, token_id)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -311,6 +735,8 @@ pub struct UpdateLinkRequest {
     /// A new Slug. A Slug change returns a `warning` because the old short URL
     /// stops working immediately and may be reused by another Link.
     pub slug: Option<String>,
+    /// Admin-only: transfer the Link to another existing User.
+    pub owner_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -587,6 +1013,7 @@ async fn update_link(
         links::LinkChanges {
             destination_url: payload.destination_url,
             slug: payload.slug,
+            owner_id: payload.owner_id,
         },
     )
     .await
