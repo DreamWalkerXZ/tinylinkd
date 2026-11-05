@@ -90,7 +90,17 @@ fn normalize_email(email: Option<String>) -> Result<Option<String>, ApiError> {
     Ok(Some(email))
 }
 
-struct PreparedUser {
+pub(crate) fn validate_password(password: &str) -> Result<(), ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::validation(
+            "invalid_password",
+            "Password must not be empty.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) struct PreparedUser {
     username: String,
     email: Option<String>,
     password_hash: String,
@@ -98,15 +108,10 @@ struct PreparedUser {
     created_at: String,
 }
 
-fn prepare_user(new: NewUser) -> Result<PreparedUser, ApiError> {
+pub(crate) fn prepare_user(new: NewUser) -> Result<PreparedUser, ApiError> {
     validate_username(&new.username)?;
     let email = normalize_email(new.email)?;
-    if new.password.is_empty() {
-        return Err(ApiError::validation(
-            "invalid_password",
-            "Password must not be empty.",
-        ));
-    }
+    validate_password(&new.password)?;
     let password_hash = hash_password(&new.password)
         .map_err(|error| ApiError::internal(format!("failed to hash password: {error}")))?;
     Ok(PreparedUser {
@@ -118,7 +123,7 @@ fn prepare_user(new: NewUser) -> Result<PreparedUser, ApiError> {
     })
 }
 
-async fn insert_user(
+pub(crate) async fn insert_user(
     connection: &mut SqliteConnection,
     prepared: &PreparedUser,
 ) -> Result<User, ApiError> {

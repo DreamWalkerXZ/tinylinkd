@@ -10,6 +10,7 @@ use crate::problems::ProblemDetails;
 pub enum ApiError {
     Validation { code: &'static str, detail: String },
     Conflict { code: &'static str, detail: String },
+    Gone { code: &'static str, detail: String },
     NotFound { detail: String },
     Database(sqlx::Error),
     Internal(String),
@@ -30,6 +31,13 @@ impl ApiError {
         }
     }
 
+    pub fn gone(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::Gone {
+            code,
+            detail: detail.into(),
+        }
+    }
+
     pub fn not_found(detail: impl Into<String>) -> Self {
         Self::NotFound {
             detail: detail.into(),
@@ -44,6 +52,7 @@ impl ApiError {
         match self {
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::Gone { .. } => StatusCode::GONE,
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -57,6 +66,9 @@ impl ApiError {
             }
             Self::Conflict { code, detail } => {
                 ProblemDetails::new(status, code, "Conflict", detail, instance)
+            }
+            Self::Gone { code, detail } => {
+                ProblemDetails::new(status, code, "Gone", detail, instance)
             }
             Self::NotFound { detail } => ProblemDetails::not_found(detail, instance),
             Self::Database(error) => {
@@ -76,6 +88,7 @@ impl fmt::Display for ApiError {
         match self {
             Self::Validation { detail, .. }
             | Self::Conflict { detail, .. }
+            | Self::Gone { detail, .. }
             | Self::NotFound { detail } => formatter.write_str(detail),
             Self::Database(error) => write!(formatter, "database error: {error}"),
             Self::Internal(detail) => formatter.write_str(detail),

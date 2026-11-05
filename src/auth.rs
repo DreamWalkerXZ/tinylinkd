@@ -1,6 +1,7 @@
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::extract::FromRequestParts;
+use axum::http::StatusCode;
 use axum::http::header;
 use axum::http::request::Parts;
 use base64::Engine;
@@ -11,7 +12,7 @@ use crate::app::AppState;
 use crate::problems::ProblemDetails;
 use crate::timeutil;
 use crate::tokens;
-use crate::users::User;
+use crate::users::{Role, User};
 
 pub const API_TOKEN_PREFIX_LEN: usize = 12;
 
@@ -49,6 +50,36 @@ pub fn generate_api_token() -> Result<GeneratedApiToken, getrandom::Error> {
         hash,
         prefix,
     })
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedOneTimeToken {
+    pub plaintext: String,
+    pub hash: String,
+}
+
+/// Generate a one-time token: 32 random bytes as base64url.
+///
+/// Invite tokens and password-reset tokens use this format. Only `hash` is
+/// stored; `plaintext` is returned to the caller exactly once.
+pub fn generate_one_time_token() -> Result<GeneratedOneTimeToken, getrandom::Error> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)?;
+    let plaintext = URL_SAFE_NO_PAD.encode(bytes);
+    let hash = hash_token(&plaintext);
+    Ok(GeneratedOneTimeToken { plaintext, hash })
+}
+
+/// Compare two byte strings without leaking where they first differ.
+pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (left, right) in left.iter().zip(right.iter()) {
+        difference |= left ^ right;
+    }
+    difference == 0
 }
 
 fn argon2() -> Argon2<'static> {
@@ -192,6 +223,35 @@ fn database_problem(instance: &str, error: sqlx::Error) -> ProblemDetails {
     ProblemDetails::internal_error(instance)
 }
 
+/// The authenticated User behind the current Bearer API token, restricted to
+/// Users with the Admin role.
+#[derive(Debug, Clone)]
+pub struct AdminUser {
+    pub current: CurrentUser,
+}
+
+impl FromRequestParts<AppState> for AdminUser {
+    type Rejection = ProblemDetails;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let instance = parts.uri.path().to_string();
+        let current = CurrentUser::from_request_parts(parts, state).await?;
+        if current.user.role != Role::Admin {
+            return Err(ProblemDetails::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Forbidden",
+                "Admin permission is required.",
+                instance,
+            ));
+        }
+        Ok(Self { current })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +280,34 @@ mod tests {
         assert_eq!(first.prefix, first.plaintext[..12]);
         assert_eq!(first.hash, sha256_hex(first.plaintext.as_bytes()));
         assert_eq!(first.hash.len(), 64);
+    }
+
+    #[test]
+    fn generated_one_time_tokens_are_32_random_bytes_as_base64url() {
+        let first = generate_one_time_token().expect("token");
+        let second = generate_one_time_token().expect("token");
+
+        assert_eq!(first.plaintext.len(), 43);
+        assert!(
+            first
+                .plaintext
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+            "{}",
+            first.plaintext
+        );
+        assert_ne!(first.plaintext, second.plaintext);
+        assert_eq!(first.hash, sha256_hex(first.plaintext.as_bytes()));
+        assert_eq!(first.hash.len(), 64);
+    }
+
+    #[test]
+    fn constant_time_eq_compares_bytes_exactly() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(!constant_time_eq(b"", b"a"));
     }
 
     #[test]
