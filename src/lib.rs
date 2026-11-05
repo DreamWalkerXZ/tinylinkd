@@ -12,6 +12,8 @@ pub mod pages;
 pub mod password_resets;
 pub mod problems;
 pub mod redirect;
+pub mod secrets;
 pub mod timeutil;
 pub mod tokens;
+pub mod unlock;
 pub mod users;

@@ -1922,6 +1922,7 @@ dependencies = [
  "base64",
  "clap",
  "getrandom 0.3.4",
+ "hmac",
  "http-body-util",
  "insta",
  "rpassword",
