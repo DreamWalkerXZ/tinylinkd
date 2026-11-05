@@ -1,18 +1,23 @@
+use std::collections::BTreeMap;
+
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, Uri};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use utoipa::OpenApi as _;
 use utoipa::ToSchema;
 
+use crate::analytics::{self, TimeRange};
 use crate::app::{AppConfig, AppState};
 use crate::auth::{AdminUser, CurrentUser};
 use crate::invites;
 use crate::links::{self, LinkStatus};
 use crate::password_resets;
 use crate::problems::ProblemDetails;
+use crate::timeutil;
 use crate::tokens;
 use crate::users::Role;
 
@@ -29,6 +34,8 @@ pub fn router() -> Router<AppState> {
             "/_/api/v1/links/{id}",
             get(get_link).patch(update_link).delete(delete_link),
         )
+        .route("/_/api/v1/links/{id}/clicks", get(list_link_clicks))
+        .route("/_/api/v1/links/{id}/stats", get(link_stats))
         .route("/_/api/v1/invites", get(list_invites).post(create_invite))
         // Axum forbids two routes that differ only in the parameter name, so
         // the Admin revoke and public validate handlers share this route and
@@ -77,7 +84,9 @@ pub fn router() -> Router<AppState> {
         list_links,
         get_link,
         update_link,
-        delete_link
+        delete_link,
+        list_link_clicks,
+        link_stats
     ),
     components(schemas(
         UserProfile,
@@ -99,6 +108,10 @@ pub fn router() -> Router<AppState> {
         LinkStatus,
         CreateLinkRequest,
         UpdateLinkRequest,
+        ClickResponse,
+        ClickListResponse,
+        LinkStatsResponse,
+        DayCount,
         ProblemDetails
     )),
     modifiers(&SecurityAddon)
@@ -628,6 +641,252 @@ async fn delete_link(
     .await
     .map_err(|error| error.into_problem(uri.path()))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ClickResponse {
+    pub id: i64,
+    pub clicked_at: String,
+    pub ip: String,
+    pub user_agent: String,
+    pub referer: Option<String>,
+    /// One of `desktop`, `mobile`, `tablet`, `bot`, or `unknown`.
+    pub device: String,
+    /// Whether the User-Agent matched a known crawler pattern. Bot Clicks are
+    /// stored and listed but excluded from human counts.
+    pub is_bot: bool,
+}
+
+impl From<analytics::Click> for ClickResponse {
+    fn from(click: analytics::Click) -> Self {
+        Self {
+            id: click.id,
+            clicked_at: click.clicked_at,
+            ip: click.ip,
+            user_agent: click.user_agent,
+            referer: click.referer,
+            device: click.device,
+            is_bot: click.is_bot,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ClickListResponse {
+    pub items: Vec<ClickResponse>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ListClicksQuery {
+    /// Include Clicks at or after this RFC 3339 UTC timestamp.
+    pub from: Option<String>,
+    /// Include Clicks at or before this RFC 3339 UTC timestamp.
+    pub to: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+fn parse_time_bound(
+    value: Option<&str>,
+    field: &str,
+    instance: &str,
+) -> Result<Option<OffsetDateTime>, ProblemDetails> {
+    value
+        .map(|value| {
+            timeutil::parse_rfc3339(value).map_err(|_| {
+                ProblemDetails::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "invalid_time_range",
+                    "Unprocessable Entity",
+                    format!("{field} must be an RFC 3339 timestamp."),
+                    instance,
+                )
+            })
+        })
+        .transpose()
+}
+
+/// Translate a Link lookup into the API's read permission rule: an unknown
+/// Link is 404, and another User's Link is 403 unless the caller is an Admin.
+async fn ensure_link_readable(
+    state: &AppState,
+    user: &CurrentUser,
+    link_id: i64,
+    instance: &str,
+) -> Result<(), ProblemDetails> {
+    let Some(link) = links::find_by_id(&state.db, link_id)
+        .await
+        .map_err(|error| error.into_problem(instance))?
+    else {
+        return Err(ProblemDetails::not_found("Link not found.", instance));
+    };
+    if link.owner_id != user.user.id && user.user.role != Role::Admin {
+        return Err(ProblemDetails::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Forbidden",
+            "You do not have permission to read this Link.",
+            instance,
+        ));
+    }
+    Ok(())
+}
+
+#[utoipa::path(
+    get,
+    path = "/_/api/v1/links/{id}/clicks",
+    tag = "analytics",
+    security(("bearerAuth" = [])),
+    params(
+        ("id" = i64, Path, description = "The Link id."),
+        ("from" = Option<String>, Query, description = "Include Clicks at or after this RFC 3339 UTC timestamp. Unbounded when omitted."),
+        ("to" = Option<String>, Query, description = "Include Clicks at or before this RFC 3339 UTC timestamp. Unbounded when omitted."),
+        ("limit" = Option<i64>, Query, description = "Maximum number of Clicks to return (default 20, maximum 100)."),
+        ("offset" = Option<i64>, Query, description = "Number of Clicks to skip.")
+    ),
+    responses(
+        (status = 200, description = "The Link's Clicks, newest first.", body = ClickListResponse),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The Link belongs to another User and the caller is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such Link.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid pagination or time range parameters.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn list_link_clicks(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    uri: Uri,
+    path: Result<Path<i64>, PathRejection>,
+    query: Result<Query<ListClicksQuery>, QueryRejection>,
+) -> Result<Json<ClickListResponse>, ProblemDetails> {
+    let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
+    ensure_link_readable(&state, &user, link_id, uri.path()).await?;
+    let range = TimeRange {
+        from: parse_time_bound(query.from.as_deref(), "from", uri.path())?,
+        to: parse_time_bound(query.to.as_deref(), "to", uri.path())?,
+    };
+    let (clicks, total) = analytics::list_clicks(&state.db, link_id, range, limit, offset)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(Json(ClickListResponse {
+        items: clicks.into_iter().map(ClickResponse::from).collect(),
+        total,
+        limit,
+        offset,
+    }))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DayCount {
+    /// The UTC calendar date, as `YYYY-MM-DD`.
+    pub date: String,
+    pub total_clicks: i64,
+    pub human_clicks: i64,
+    pub bot_clicks: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LinkStatsResponse {
+    pub total_clicks: i64,
+    /// Clicks whose User-Agent did not match a crawler pattern.
+    pub human_clicks: i64,
+    /// Clicks whose User-Agent matched a crawler pattern.
+    pub bot_clicks: i64,
+    /// Clicks by device, including bot-device Clicks.
+    pub by_device: BTreeMap<String, i64>,
+    /// Clicks by UTC calendar day, oldest first. Only days with Clicks appear.
+    pub by_day: Vec<DayCount>,
+}
+
+impl From<analytics::ClickStats> for LinkStatsResponse {
+    fn from(stats: analytics::ClickStats) -> Self {
+        Self {
+            total_clicks: stats.total_clicks,
+            human_clicks: stats.human_clicks,
+            bot_clicks: stats.bot_clicks,
+            by_device: stats.by_device,
+            by_day: stats
+                .by_day
+                .into_iter()
+                .map(|day| DayCount {
+                    date: day.date,
+                    total_clicks: day.total_clicks,
+                    human_clicks: day.human_clicks,
+                    bot_clicks: day.bot_clicks,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct LinkStatsQuery {
+    /// Include Clicks at or after this RFC 3339 UTC timestamp.
+    pub from: Option<String>,
+    /// Include Clicks at or before this RFC 3339 UTC timestamp.
+    pub to: Option<String>,
+    /// Bucket size. Only `day` is supported.
+    pub interval: Option<String>,
+}
+
+/// Today the only supported bucket size is `day`; T10 keeps this shape while
+/// switching the bucket boundary to the Instance timezone.
+fn parse_stats_interval(value: Option<&str>, instance: &str) -> Result<(), ProblemDetails> {
+    match value {
+        None | Some("day") => Ok(()),
+        Some(_) => Err(ProblemDetails::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_interval",
+            "Unprocessable Entity",
+            "interval must be 'day'.",
+            instance,
+        )),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/_/api/v1/links/{id}/stats",
+    tag = "analytics",
+    security(("bearerAuth" = [])),
+    params(
+        ("id" = i64, Path, description = "The Link id."),
+        ("from" = Option<String>, Query, description = "Include Clicks at or after this RFC 3339 UTC timestamp. Unbounded when omitted."),
+        ("to" = Option<String>, Query, description = "Include Clicks at or before this RFC 3339 UTC timestamp. Unbounded when omitted."),
+        ("interval" = Option<String>, Query, description = "Bucket size: `day` (the default).")
+    ),
+    responses(
+        (status = 200, description = "Total, human, and bot Click counts with by-device and by-day buckets.", body = LinkStatsResponse),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The Link belongs to another User and the caller is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such Link.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid time range or interval parameters.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn link_stats(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    uri: Uri,
+    path: Result<Path<i64>, PathRejection>,
+    query: Result<Query<LinkStatsQuery>, QueryRejection>,
+) -> Result<Json<LinkStatsResponse>, ProblemDetails> {
+    let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
+    parse_stats_interval(query.interval.as_deref(), uri.path())?;
+    ensure_link_readable(&state, &user, link_id, uri.path()).await?;
+    let range = TimeRange {
+        from: parse_time_bound(query.from.as_deref(), "from", uri.path())?,
+        to: parse_time_bound(query.to.as_deref(), "to", uri.path())?,
+    };
+    let stats = analytics::click_stats(&state.db, link_id, range)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(Json(LinkStatsResponse::from(stats)))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
