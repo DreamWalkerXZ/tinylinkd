@@ -7,6 +7,7 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use tracing::info;
 
+use tinylinkd::analytics;
 use tinylinkd::app::{AppConfig, build_router_with_config};
 use tinylinkd::bootstrap::{BootstrapAdmin, bootstrap_admin};
 use tinylinkd::config::{AdminCommand, Cli, Command, Config, TokenCommand};
@@ -119,6 +120,7 @@ fn read_password() -> Result<String> {
 async fn serve(config: Config) -> Result<()> {
     let db = Database::connect(&config.data_dir).await?;
     bootstrap_admin(&db, BootstrapAdmin::from_env()).await?;
+    analytics::spawn_click_retention(db.clone());
     let app = build_router_with_config(
         db,
         AppConfig::new(config.base_url.clone(), config.trust_proxy),
