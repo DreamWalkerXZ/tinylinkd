@@ -22,6 +22,7 @@ async fn openapi_document_covers_auth_and_token_routes() {
         "/_/api/v1/me/password",
         "/_/api/v1/tokens",
         "/_/api/v1/tokens/{id}",
+        "/_/api/v1/settings",
         "/_/api/v1/links",
         "/_/api/v1/links/{id}",
         "/_/api/v1/links/{id}/clicks",
@@ -57,6 +58,8 @@ async fn openapi_document_covers_auth_and_token_routes() {
     assert!(document["paths"]["/_/api/v1/tokens"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/tokens"]["post"].is_object());
     assert!(document["paths"]["/_/api/v1/tokens/{id}"]["delete"].is_object());
+    assert!(document["paths"]["/_/api/v1/settings"]["get"].is_object());
+    assert!(document["paths"]["/_/api/v1/settings"]["patch"].is_object());
     assert!(document["paths"]["/_/api/v1/links"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/links"]["post"].is_object());
     assert!(document["paths"]["/_/api/v1/links/{id}"]["get"].is_object());
@@ -116,6 +119,8 @@ async fn openapi_document_covers_auth_and_token_routes() {
         "UpdateProfileRequest",
         "ChangePasswordRequest",
         "DeleteAccountRequest",
+        "SettingsResponse",
+        "UpdateSettingsRequest",
     ] {
         assert!(
             document["components"]["schemas"].get(schema).is_some(),

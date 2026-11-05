@@ -18,6 +18,7 @@ use crate::auth;
 use crate::links::{self, Link, NewClick};
 use crate::pages;
 use crate::secrets;
+use crate::settings;
 use crate::timeutil;
 use crate::unlock;
 
@@ -222,9 +223,23 @@ async fn unlock(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let value = unlock::issue_cookie(&secret, link.id, link.password_version, timeutil::now());
+    let instance_settings = match settings::load(&state.db).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::error!(error = %error, link_id = link.id, "failed to read Instance settings");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let ttl_seconds = instance_settings.password_unlock_ttl_seconds;
+    let value = unlock::issue_cookie(
+        &secret,
+        link.id,
+        link.password_version,
+        timeutil::now(),
+        ttl_seconds,
+    );
     let secure = state.config.base_url.scheme() == "https";
-    let set_cookie = unlock::set_cookie_header(link.id, &value, secure);
+    let set_cookie = unlock::set_cookie_header(link.id, &value, secure, ttl_seconds);
 
     let mut response = StatusCode::SEE_OTHER.into_response();
     response.headers_mut().insert(
