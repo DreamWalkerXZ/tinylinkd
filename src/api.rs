@@ -751,6 +751,13 @@ pub struct UpdateLinkRequest {
     /// leave the password unchanged.
     #[serde(default, deserialize_with = "deserialize_optional_password")]
     pub password: Option<Option<String>>,
+    /// The Link's expiry as an RFC 3339 timestamp, stored and returned in UTC.
+    /// Omit the field to leave the expiry unchanged; send `null` to remove it
+    /// and make the Link permanent. A timestamp at or before the current time
+    /// makes the Link expired.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[schema(value_type = Option<String>)]
+    pub expires_at: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1007,7 +1014,7 @@ async fn get_link(
         (status = 403, description = "The Link belongs to another User and the caller is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
         (status = 404, description = "No such Link.", body = ProblemDetails, content_type = "application/problem+json"),
         (status = 409, description = "The requested Slug is already taken.", body = ProblemDetails, content_type = "application/problem+json"),
-        (status = 422, description = "The Destination URL or Slug is invalid.", body = ProblemDetails, content_type = "application/problem+json")
+        (status = 422, description = "The Destination URL, Slug, or expiry is invalid.", body = ProblemDetails, content_type = "application/problem+json")
     )
 )]
 async fn update_link(
@@ -1030,6 +1037,7 @@ async fn update_link(
             slug: payload.slug,
             owner_id: payload.owner_id,
             password: payload.password,
+            expires_at: payload.expires_at,
         },
     )
     .await
