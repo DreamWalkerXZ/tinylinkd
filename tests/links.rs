@@ -315,8 +315,11 @@ async fn link_list_returns_only_the_current_users_links_with_pagination() {
     assert_eq!(list["offset"], 0);
     let items = list["items"].as_array().expect("items");
     assert_eq!(items.len(), 2);
-    assert_eq!(items[0]["slug"], "alice-one");
-    assert_eq!(items[1]["slug"], "alice-two");
+    assert_eq!(
+        items[0]["slug"], "alice-two",
+        "the default sort is newest first"
+    );
+    assert_eq!(items[1]["slug"], "alice-one");
 
     let bob_list = context
         .get("/_/api/v1/links", Some(&bob_token))
@@ -334,7 +337,7 @@ async fn link_list_returns_only_the_current_users_links_with_pagination() {
     assert_eq!(page["offset"], 1);
     let items = page["items"].as_array().expect("items");
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["slug"], "alice-two");
+    assert_eq!(items[0]["slug"], "alice-one");
 
     let invalid = context
         .get("/_/api/v1/links?limit=0", Some(&alice_token))

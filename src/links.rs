@@ -1,6 +1,6 @@
 use serde::Serialize;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Row, SqliteConnection};
+use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
 use url::Url;
 use utoipa::ToSchema;
 
@@ -197,6 +197,225 @@ pub async fn find_by_id(db: &Database, id: i64) -> Result<Option<Link>, ApiError
     row.as_ref().map(link_from_row).transpose()
 }
 
+async fn find_by_id_on(
+    connection: &mut SqliteConnection,
+    id: i64,
+) -> Result<Option<Link>, ApiError> {
+    let row = sqlx::query(&format!("SELECT {LINK_SELECT} FROM links l WHERE l.id = ?"))
+        .bind(id)
+        .fetch_optional(&mut *connection)
+        .await?;
+    row.as_ref().map(link_from_row).transpose()
+}
+
+/// The warning returned when a Link's Slug changes: the old short URL stops
+/// working immediately and may be claimed by another Link.
+pub const SLUG_RELEASE_WARNING: &str =
+    "The old Slug stops working immediately and may be reused by another Link.";
+
+#[derive(Debug, Clone)]
+pub struct LinkChanges {
+    pub destination_url: Option<String>,
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdatedLink {
+    pub link: Link,
+    pub warning: Option<String>,
+}
+
+/// Edit a Link. Only its owner or an Admin may update it. A Slug change is a
+/// read-modify-write inside one `BEGIN IMMEDIATE` transaction, so the old Slug
+/// is released and the new one claimed atomically.
+pub async fn update_link(
+    db: &Database,
+    link_id: i64,
+    actor_id: i64,
+    is_admin: bool,
+    changes: LinkChanges,
+) -> Result<UpdatedLink, ApiError> {
+    let destination_url = changes
+        .destination_url
+        .as_deref()
+        .map(validate_destination_url)
+        .transpose()?;
+    if let Some(slug) = changes.slug.as_deref() {
+        validate_slug(slug)?;
+    }
+
+    let now = timeutil::now_rfc3339();
+    let mut transaction = db.write_pool().begin_with("BEGIN IMMEDIATE").await?;
+    let Some(current) = find_by_id_on(&mut transaction, link_id).await? else {
+        transaction.rollback().await?;
+        return Err(ApiError::not_found("Link not found."));
+    };
+    if let Err(error) = ensure_can_manage(&current, actor_id, is_admin, "edit") {
+        transaction.rollback().await?;
+        return Err(error);
+    }
+
+    let slug = changes.slug.as_deref().unwrap_or(&current.slug);
+    let slug_changed = slug != current.slug;
+    if slug_changed && slug_exists(&mut transaction, slug).await? {
+        transaction.rollback().await?;
+        return Err(ApiError::conflict("slug_taken", "Slug is already taken."));
+    }
+
+    let destination_url = destination_url
+        .as_deref()
+        .unwrap_or(&current.destination_url);
+    let changed = slug_changed || destination_url != current.destination_url;
+    let mut warning = None;
+    if changed {
+        sqlx::query("UPDATE links SET slug = ?, destination_url = ?, updated_at = ? WHERE id = ?")
+            .bind(slug)
+            .bind(destination_url)
+            .bind(&now)
+            .bind(link_id)
+            .execute(&mut *transaction)
+            .await?;
+        if slug_changed {
+            warning = Some(SLUG_RELEASE_WARNING.to_string());
+        }
+    }
+
+    let link = find_by_id_on(&mut transaction, link_id)
+        .await?
+        .ok_or_else(|| ApiError::internal("the edited Link disappeared"))?;
+    transaction.commit().await?;
+    Ok(UpdatedLink { link, warning })
+}
+
+/// Hard-delete a Link. Only its owner or an Admin may delete it. The Link's
+/// Clicks cascade and its Slug is released in the same transaction.
+pub async fn delete_link(
+    db: &Database,
+    link_id: i64,
+    actor_id: i64,
+    is_admin: bool,
+) -> Result<(), ApiError> {
+    let mut transaction = db.write_pool().begin_with("BEGIN IMMEDIATE").await?;
+    let Some(link) = find_by_id_on(&mut transaction, link_id).await? else {
+        transaction.rollback().await?;
+        return Err(ApiError::not_found("Link not found."));
+    };
+    if let Err(error) = ensure_can_manage(&link, actor_id, is_admin, "delete") {
+        transaction.rollback().await?;
+        return Err(error);
+    }
+    sqlx::query("DELETE FROM links WHERE id = ?")
+        .bind(link_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+fn ensure_can_manage(
+    link: &Link,
+    actor_id: i64,
+    is_admin: bool,
+    action: &str,
+) -> Result<(), ApiError> {
+    if link.owner_id != actor_id && !is_admin {
+        return Err(ApiError::forbidden(format!(
+            "You do not have permission to {action} this Link."
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkSort {
+    CreatedAtAsc,
+    CreatedAtDesc,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkFilter {
+    pub owner_id: Option<i64>,
+    pub status: Option<LinkStatus>,
+    pub q: Option<String>,
+    pub sort: LinkSort,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+pub async fn list_links(db: &Database, filter: &LinkFilter) -> Result<(Vec<Link>, i64), ApiError> {
+    let now = timeutil::now_rfc3339();
+
+    let mut count = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM links l");
+    push_list_filters(&mut count, filter, &now);
+    let total: i64 = count.build_query_scalar().fetch_one(db.read_pool()).await?;
+
+    let mut select = QueryBuilder::<Sqlite>::new(format!("SELECT {LINK_SELECT} FROM links l"));
+    push_list_filters(&mut select, filter, &now);
+    match filter.sort {
+        LinkSort::CreatedAtAsc => select.push(" ORDER BY l.created_at ASC, l.id ASC"),
+        LinkSort::CreatedAtDesc => select.push(" ORDER BY l.created_at DESC, l.id DESC"),
+    };
+    select
+        .push(" LIMIT ")
+        .push_bind(filter.limit)
+        .push(" OFFSET ")
+        .push_bind(filter.offset);
+    let rows = select.build().fetch_all(db.read_pool()).await?;
+
+    let links = rows
+        .iter()
+        .map(link_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((links, total))
+}
+
+fn push_list_filters<'a>(
+    builder: &mut QueryBuilder<'a, Sqlite>,
+    filter: &LinkFilter,
+    now: &'a str,
+) {
+    builder.push(" WHERE 1 = 1");
+    if let Some(owner_id) = filter.owner_id {
+        builder.push(" AND l.owner_id = ").push_bind(owner_id);
+    }
+    match filter.status {
+        Some(LinkStatus::Active) => {
+            builder
+                .push(" AND (l.expires_at IS NULL OR l.expires_at > ")
+                .push_bind(now)
+                .push(")");
+        }
+        Some(LinkStatus::Expired) => {
+            builder
+                .push(" AND l.expires_at IS NOT NULL AND l.expires_at <= ")
+                .push_bind(now);
+        }
+        None => {}
+    }
+    if let Some(q) = filter.q.as_deref().filter(|q| !q.is_empty()) {
+        let pattern = format!("%{}%", escape_like(q));
+        builder
+            .push(" AND (l.slug LIKE ")
+            .push_bind(pattern.clone())
+            .push(" ESCAPE '\\' OR l.destination_url LIKE ")
+            .push_bind(pattern)
+            .push(" ESCAPE '\\')");
+    }
+}
+
+/// Escape `%`, `_`, and the escape character itself for a SQLite `LIKE`
+/// pattern that uses `ESCAPE '\'`.
+fn escape_like(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 pub async fn find_by_slug(db: &Database, slug: &str) -> Result<Option<Link>, ApiError> {
     let row = sqlx::query(&format!(
         "SELECT {LINK_SELECT} FROM links l WHERE l.slug = ?"
@@ -205,33 +424,6 @@ pub async fn find_by_slug(db: &Database, slug: &str) -> Result<Option<Link>, Api
     .fetch_optional(db.read_pool())
     .await?;
     row.as_ref().map(link_from_row).transpose()
-}
-
-pub async fn list_links(
-    db: &Database,
-    owner_id: i64,
-    limit: i64,
-    offset: i64,
-) -> Result<(Vec<Link>, i64), ApiError> {
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM links WHERE owner_id = ?")
-        .bind(owner_id)
-        .fetch_one(db.read_pool())
-        .await?;
-
-    let rows = sqlx::query(&format!(
-        "SELECT {LINK_SELECT} FROM links l WHERE l.owner_id = ? ORDER BY l.id LIMIT ? OFFSET ?"
-    ))
-    .bind(owner_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(db.read_pool())
-    .await?;
-
-    let links = rows
-        .iter()
-        .map(link_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((links, total))
 }
 
 /// Append a short URL's query string to a Destination URL's query component,
