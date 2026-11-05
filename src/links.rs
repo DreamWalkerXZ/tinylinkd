@@ -217,6 +217,8 @@ pub const SLUG_RELEASE_WARNING: &str =
 pub struct LinkChanges {
     pub destination_url: Option<String>,
     pub slug: Option<String>,
+    /// Admin-only: the User who will own the Link.
+    pub owner_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +237,11 @@ pub async fn update_link(
     is_admin: bool,
     changes: LinkChanges,
 ) -> Result<UpdatedLink, ApiError> {
+    if changes.owner_id.is_some() && !is_admin {
+        return Err(ApiError::forbidden(
+            "Only Admins may transfer Link ownership.",
+        ));
+    }
     let destination_url = changes
         .destination_url
         .as_deref()
@@ -255,6 +262,18 @@ pub async fn update_link(
         return Err(error);
     }
 
+    let owner_id = changes.owner_id.unwrap_or(current.owner_id);
+    if owner_id != current.owner_id {
+        let owner_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE id = ?")
+            .bind(owner_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if owner_exists.is_none() {
+            transaction.rollback().await?;
+            return Err(ApiError::not_found("User not found."));
+        }
+    }
+
     let slug = changes.slug.as_deref().unwrap_or(&current.slug);
     let slug_changed = slug != current.slug;
     if slug_changed && slug_exists(&mut transaction, slug).await? {
@@ -265,16 +284,21 @@ pub async fn update_link(
     let destination_url = destination_url
         .as_deref()
         .unwrap_or(&current.destination_url);
-    let changed = slug_changed || destination_url != current.destination_url;
+    let owner_changed = owner_id != current.owner_id;
+    let changed = slug_changed || destination_url != current.destination_url || owner_changed;
     let mut warning = None;
     if changed {
-        sqlx::query("UPDATE links SET slug = ?, destination_url = ?, updated_at = ? WHERE id = ?")
-            .bind(slug)
-            .bind(destination_url)
-            .bind(&now)
-            .bind(link_id)
-            .execute(&mut *transaction)
-            .await?;
+        sqlx::query(
+            "UPDATE links SET slug = ?, destination_url = ?, owner_id = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(slug)
+        .bind(destination_url)
+        .bind(owner_id)
+        .bind(&now)
+        .bind(link_id)
+        .execute(&mut *transaction)
+        .await?;
         if slug_changed {
             warning = Some(SLUG_RELEASE_WARNING.to_string());
         }

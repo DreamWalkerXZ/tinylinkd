@@ -8,6 +8,7 @@ use crate::problems::ProblemDetails;
 /// response at the HTTP boundary and to a plain message in the CLI.
 #[derive(Debug)]
 pub enum ApiError {
+    Unauthorized { code: &'static str, detail: String },
     Validation { code: &'static str, detail: String },
     Forbidden { detail: String },
     Conflict { code: &'static str, detail: String },
@@ -18,6 +19,13 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    pub fn unauthorized(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::Unauthorized {
+            code,
+            detail: detail.into(),
+        }
+    }
+
     pub fn validation(code: &'static str, detail: impl Into<String>) -> Self {
         Self::Validation {
             code,
@@ -57,6 +65,7 @@ impl ApiError {
 
     pub fn status(&self) -> StatusCode {
         match self {
+            Self::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Forbidden { .. } => StatusCode::FORBIDDEN,
             Self::Conflict { .. } => StatusCode::CONFLICT,
@@ -69,6 +78,9 @@ impl ApiError {
     pub fn into_problem(self, instance: &str) -> ProblemDetails {
         let status = self.status();
         match self {
+            Self::Unauthorized { code, detail } => {
+                ProblemDetails::unauthorized(code, detail, instance)
+            }
             Self::Validation { code, detail } => {
                 ProblemDetails::new(status, code, "Unprocessable Entity", detail, instance)
             }
@@ -97,7 +109,8 @@ impl ApiError {
 impl fmt::Display for ApiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Validation { detail, .. }
+            Self::Unauthorized { detail, .. }
+            | Self::Validation { detail, .. }
             | Self::Forbidden { detail }
             | Self::Conflict { detail, .. }
             | Self::Gone { detail, .. }
