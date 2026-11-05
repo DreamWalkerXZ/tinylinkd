@@ -1,0 +1,523 @@
+use serde::Serialize;
+use sqlx::sqlite::SqliteRow;
+use sqlx::{Row, SqliteConnection};
+use url::Url;
+use utoipa::ToSchema;
+
+use crate::db::Database;
+use crate::error::ApiError;
+use crate::timeutil;
+
+pub const SLUG_MIN_LEN: usize = 3;
+pub const SLUG_MAX_LEN: usize = 64;
+pub const RANDOM_SLUG_LEN: usize = 8;
+pub const RANDOM_SLUG_ATTEMPTS: usize = 10;
+
+const SLUG_ALPHABET: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkStatus {
+    Active,
+    Expired,
+}
+
+#[derive(Debug, Clone)]
+pub struct Link {
+    pub id: i64,
+    pub owner_id: i64,
+    pub slug: String,
+    pub destination_url: String,
+    pub has_password: bool,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub total_clicks: i64,
+    pub human_clicks: i64,
+    pub bot_clicks: i64,
+}
+
+impl Link {
+    pub fn status(&self) -> LinkStatus {
+        let Some(expires_at) = &self.expires_at else {
+            return LinkStatus::Active;
+        };
+        match timeutil::parse_rfc3339(expires_at) {
+            Ok(expires_at) if expires_at <= timeutil::now() => LinkStatus::Expired,
+            Ok(_) => LinkStatus::Active,
+            Err(error) => {
+                tracing::error!(error = %error, "stored Link expiry is not RFC 3339");
+                LinkStatus::Active
+            }
+        }
+    }
+}
+
+/// Validate a Slug: 3-64 characters using ASCII `a-z`, `0-9`, and internal
+/// hyphens. It must start and end with a letter or digit. Uppercase input is
+/// invalid and is never normalized.
+pub fn validate_slug(slug: &str) -> Result<(), ApiError> {
+    let bytes = slug.as_bytes();
+    let length_ok = (SLUG_MIN_LEN..=SLUG_MAX_LEN).contains(&bytes.len());
+    let characters_ok = bytes
+        .iter()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-');
+    let edges_ok = matches!(bytes.first(), Some(byte) if byte.is_ascii_alphanumeric())
+        && matches!(bytes.last(), Some(byte) if byte.is_ascii_alphanumeric());
+    if length_ok && characters_ok && edges_ok {
+        Ok(())
+    } else {
+        Err(ApiError::validation(
+            "invalid_slug",
+            "Slug must be 3-64 characters using ASCII lowercase letters, digits, and internal \
+             hyphens, and must start and end with a letter or digit.",
+        ))
+    }
+}
+
+/// Validate a Destination URL: an absolute `http` or `https` URL. The URL is
+/// stored as provided and is never fetched.
+pub fn validate_destination_url(value: &str) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    let parsed = Url::parse(trimmed).map_err(|_| invalid_destination_url())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(invalid_destination_url());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn invalid_destination_url() -> ApiError {
+    ApiError::validation(
+        "invalid_destination_url",
+        "Destination URL must be an absolute http or https URL.",
+    )
+}
+
+/// Generate a random 8-character Slug from `a-z0-9`.
+pub fn random_slug() -> Result<String, ApiError> {
+    let mut bytes = [0u8; RANDOM_SLUG_LEN];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        ApiError::internal(format!("failed to generate a random Slug: {error}"))
+    })?;
+    Ok(bytes
+        .iter()
+        .map(|byte| SLUG_ALPHABET[usize::from(*byte) % SLUG_ALPHABET.len()] as char)
+        .collect())
+}
+
+pub async fn create_link(
+    db: &Database,
+    owner_id: i64,
+    destination_url: &str,
+    slug: Option<&str>,
+) -> Result<Link, ApiError> {
+    let destination_url = validate_destination_url(destination_url)?;
+    match slug {
+        Some(slug) => {
+            validate_slug(slug)?;
+            create_with_slug(db, owner_id, &destination_url, slug).await
+        }
+        None => create_with_generated_slug(db, owner_id, &destination_url, random_slug).await,
+    }
+}
+
+async fn create_with_slug(
+    db: &Database,
+    owner_id: i64,
+    destination_url: &str,
+    slug: &str,
+) -> Result<Link, ApiError> {
+    let now = timeutil::now_rfc3339();
+    let mut transaction = db.write_pool().begin_with("BEGIN IMMEDIATE").await?;
+    if slug_exists(&mut transaction, slug).await? {
+        transaction.rollback().await?;
+        return Err(ApiError::conflict("slug_taken", "Slug is already taken."));
+    }
+    let link = insert_link(&mut transaction, owner_id, slug, destination_url, &now).await?;
+    transaction.commit().await?;
+    Ok(link)
+}
+
+/// Create a Link with a generated Slug, retrying collisions up to
+/// `RANDOM_SLUG_ATTEMPTS` times.
+async fn create_with_generated_slug(
+    db: &Database,
+    owner_id: i64,
+    destination_url: &str,
+    mut next_slug: impl FnMut() -> Result<String, ApiError>,
+) -> Result<Link, ApiError> {
+    let now = timeutil::now_rfc3339();
+    let mut transaction = db.write_pool().begin_with("BEGIN IMMEDIATE").await?;
+    for _ in 0..RANDOM_SLUG_ATTEMPTS {
+        let slug = next_slug()?;
+        if slug_exists(&mut transaction, &slug).await? {
+            continue;
+        }
+        let link = insert_link(&mut transaction, owner_id, &slug, destination_url, &now).await?;
+        transaction.commit().await?;
+        return Ok(link);
+    }
+    transaction.rollback().await?;
+    Err(ApiError::internal(
+        "failed to generate a unique random Slug after 10 attempts",
+    ))
+}
+
+/// Link columns plus the click counts exposed by the API.
+const LINK_SELECT: &str = "
+    l.id, l.owner_id, l.slug, l.destination_url,
+    (l.password_hash IS NOT NULL) AS has_password,
+    l.expires_at, l.created_at, l.updated_at,
+    (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id) AS total_clicks,
+    (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id AND c.is_bot = 0) AS human_clicks,
+    (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id AND c.is_bot = 1) AS bot_clicks
+";
+
+fn link_from_row(row: &SqliteRow) -> Result<Link, ApiError> {
+    Ok(Link {
+        id: row.try_get("id")?,
+        owner_id: row.try_get("owner_id")?,
+        slug: row.try_get("slug")?,
+        destination_url: row.try_get("destination_url")?,
+        has_password: row.try_get::<i64, _>("has_password")? != 0,
+        expires_at: row.try_get("expires_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        total_clicks: row.try_get("total_clicks")?,
+        human_clicks: row.try_get("human_clicks")?,
+        bot_clicks: row.try_get("bot_clicks")?,
+    })
+}
+
+pub async fn find_by_id(db: &Database, id: i64) -> Result<Option<Link>, ApiError> {
+    let row = sqlx::query(&format!("SELECT {LINK_SELECT} FROM links l WHERE l.id = ?"))
+        .bind(id)
+        .fetch_optional(db.read_pool())
+        .await?;
+    row.as_ref().map(link_from_row).transpose()
+}
+
+pub async fn find_by_slug(db: &Database, slug: &str) -> Result<Option<Link>, ApiError> {
+    let row = sqlx::query(&format!(
+        "SELECT {LINK_SELECT} FROM links l WHERE l.slug = ?"
+    ))
+    .bind(slug)
+    .fetch_optional(db.read_pool())
+    .await?;
+    row.as_ref().map(link_from_row).transpose()
+}
+
+pub async fn list_links(
+    db: &Database,
+    owner_id: i64,
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<Link>, i64), ApiError> {
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM links WHERE owner_id = ?")
+        .bind(owner_id)
+        .fetch_one(db.read_pool())
+        .await?;
+
+    let rows = sqlx::query(&format!(
+        "SELECT {LINK_SELECT} FROM links l WHERE l.owner_id = ? ORDER BY l.id LIMIT ? OFFSET ?"
+    ))
+    .bind(owner_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(db.read_pool())
+    .await?;
+
+    let links = rows
+        .iter()
+        .map(link_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((links, total))
+}
+
+/// Append a short URL's query string to a Destination URL's query component,
+/// before any fragment, using `&` when the Destination URL already has a query.
+pub fn redirect_target(destination_url: &str, query: Option<&str>) -> String {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return destination_url.to_string();
+    };
+    match destination_url.split_once('#') {
+        Some((before_fragment, fragment)) => {
+            format!("{}#{}", append_query_to(before_fragment, query), fragment)
+        }
+        None => append_query_to(destination_url, query),
+    }
+}
+
+fn append_query_to(destination: &str, query: &str) -> String {
+    if !destination.contains('?') {
+        format!("{destination}?{query}")
+    } else if destination.ends_with('?') || destination.ends_with('&') {
+        format!("{destination}{query}")
+    } else {
+        format!("{destination}&{query}")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Device {
+    Desktop,
+    Mobile,
+    Tablet,
+    Bot,
+    Unknown,
+}
+
+impl Device {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Mobile => "mobile",
+            Self::Tablet => "tablet",
+            Self::Bot => "bot",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewClick {
+    pub ip: String,
+    pub user_agent: String,
+    pub referer: Option<String>,
+    pub device: Device,
+    pub is_bot: bool,
+}
+
+/// Classify a User-Agent into a device type and bot flag using a small set of
+/// common crawler and browser patterns. No external service is called.
+pub fn classify_user_agent(user_agent: &str) -> (Device, bool) {
+    let user_agent = user_agent.to_ascii_lowercase();
+    if contains_any(
+        &user_agent,
+        &[
+            "bot",
+            "crawler",
+            "spider",
+            "slurp",
+            "bingpreview",
+            "facebookexternalhit",
+            "headlesschrome",
+            "phantomjs",
+            "curl/",
+            "wget/",
+            "python-requests",
+            "go-http-client",
+            "okhttp",
+            "java/",
+        ],
+    ) {
+        return (Device::Bot, true);
+    }
+    if contains_any(
+        &user_agent,
+        &["ipad", "tablet", "kindle", "silk/", "playbook"],
+    ) || (user_agent.contains("android") && !user_agent.contains("mobile"))
+    {
+        return (Device::Tablet, false);
+    }
+    if contains_any(
+        &user_agent,
+        &[
+            "mobile",
+            "iphone",
+            "ipod",
+            "android",
+            "blackberry",
+            "windows phone",
+            "opera mini",
+            "iemobile",
+        ],
+    ) {
+        return (Device::Mobile, false);
+    }
+    if contains_any(
+        &user_agent,
+        &["windows nt", "macintosh", "x11", "linux", "cros"],
+    ) {
+        return (Device::Desktop, false);
+    }
+    (Device::Unknown, false)
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+/// Record a Click. The caller treats failures as best-effort.
+pub async fn record_click(db: &Database, link_id: i64, click: NewClick) -> Result<(), ApiError> {
+    let now = timeutil::now_rfc3339();
+    sqlx::query(
+        "INSERT INTO clicks (link_id, clicked_at, ip, user_agent, referer, device, is_bot, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(link_id)
+    .bind(&now)
+    .bind(&click.ip)
+    .bind(&click.user_agent)
+    .bind(&click.referer)
+    .bind(click.device.as_str())
+    .bind(if click.is_bot { 1_i64 } else { 0_i64 })
+    .bind(&now)
+    .execute(db.write_pool())
+    .await?;
+    Ok(())
+}
+
+async fn slug_exists(connection: &mut SqliteConnection, slug: &str) -> Result<bool, ApiError> {
+    let exists: i64 = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM links WHERE slug = ?)")
+        .bind(slug)
+        .fetch_one(&mut *connection)
+        .await?;
+    Ok(exists != 0)
+}
+
+async fn insert_link(
+    connection: &mut SqliteConnection,
+    owner_id: i64,
+    slug: &str,
+    destination_url: &str,
+    now: &str,
+) -> Result<Link, ApiError> {
+    let result = sqlx::query(
+        "INSERT INTO links (owner_id, slug, destination_url, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(owner_id)
+    .bind(slug)
+    .bind(destination_url)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *connection)
+    .await?;
+
+    Ok(Link {
+        id: result.last_insert_rowid(),
+        owner_id,
+        slug: slug.to_string(),
+        destination_url: destination_url.to_string(),
+        has_password: false,
+        expires_at: None,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+        total_clicks: 0,
+        human_clicks: 0,
+        bot_clicks: 0,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn accepts(slug: &str) {
+        assert!(validate_slug(slug).is_ok(), "expected {slug:?} to be valid");
+    }
+
+    fn rejects(slug: &str) {
+        assert!(
+            validate_slug(slug).is_err(),
+            "expected {slug:?} to be invalid"
+        );
+    }
+
+    #[test]
+    fn slug_validation_enforces_the_spec_rules() {
+        accepts("abc");
+        accepts("123");
+        accepts("a1b2");
+        accepts("a-b-c");
+        accepts("a--b");
+        accepts(&"a".repeat(SLUG_MIN_LEN));
+        accepts(&"a".repeat(SLUG_MAX_LEN));
+
+        rejects("");
+        rejects("ab");
+        rejects(&"a".repeat(SLUG_MAX_LEN + 1));
+        rejects("Abc");
+        rejects("ABC");
+        rejects("-abc");
+        rejects("abc-");
+        rejects("-");
+        rejects("a_b");
+        rejects("a.b");
+        rejects("a b");
+        rejects("caf\u{e9}");
+        rejects("a/b");
+    }
+
+    #[test]
+    fn random_slugs_are_eight_lowercase_alphanumeric_characters() {
+        for _ in 0..100 {
+            let slug = random_slug().expect("random slug");
+            assert_eq!(slug.len(), RANDOM_SLUG_LEN);
+            assert!(
+                slug.bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()),
+                "unexpected character in {slug}"
+            );
+        }
+    }
+
+    async fn test_user(db: &Database) -> crate::users::User {
+        crate::users::create_user(
+            db,
+            crate::users::NewUser {
+                username: "alice".into(),
+                email: None,
+                password: "correct horse battery staple".into(),
+                role: crate::users::Role::User,
+            },
+        )
+        .await
+        .expect("create user")
+    }
+
+    #[tokio::test]
+    async fn generated_slugs_retry_on_collision() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = Database::connect(dir.path()).await.expect("database");
+        let user = test_user(&db).await;
+        create_link(&db, user.id, "https://example.com/", Some("taken123"))
+            .await
+            .expect("seed link");
+
+        let mut candidates = ["taken123", "taken123", "free1234"].into_iter();
+        let link = create_with_generated_slug(&db, user.id, "https://example.com/", || {
+            candidates
+                .next()
+                .map(str::to_string)
+                .ok_or_else(|| ApiError::internal("no more candidates"))
+        })
+        .await
+        .expect("link created after retries");
+
+        assert_eq!(link.slug, "free1234");
+    }
+
+    #[tokio::test]
+    async fn generated_slugs_give_up_after_ten_collisions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = Database::connect(dir.path()).await.expect("database");
+        let user = test_user(&db).await;
+        create_link(&db, user.id, "https://example.com/", Some("taken123"))
+            .await
+            .expect("seed link");
+
+        let result = create_with_generated_slug(&db, user.id, "https://example.com/", || {
+            Ok::<_, ApiError>("taken123".to_string())
+        })
+        .await;
+
+        assert!(result.is_err(), "expected Slug generation to give up");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM links")
+            .fetch_one(db.read_pool())
+            .await
+            .expect("count links");
+        assert_eq!(count, 1, "a failed creation must not insert a Link");
+    }
+}

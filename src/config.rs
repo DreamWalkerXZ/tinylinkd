@@ -110,6 +110,15 @@ pub struct ServeArgs {
     #[arg(long, env = "TLD_LISTEN_ADDR", default_value = "127.0.0.1:8080")]
     pub listen_addr: SocketAddr,
 
+    /// Trust the first address in X-Forwarded-For as the client IP.
+    #[arg(
+        long,
+        env = "TLD_TRUST_PROXY",
+        action = clap::ArgAction::Set,
+        default_value_t = false
+    )]
+    pub trust_proxy: bool,
+
     #[command(flatten)]
     pub common: CommonArgs,
 }
@@ -132,6 +141,7 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     pub data_dir: PathBuf,
     pub log_format: LogFormat,
+    pub trust_proxy: bool,
 }
 
 impl Config {
@@ -141,6 +151,7 @@ impl Config {
             listen_addr: args.listen_addr,
             data_dir: args.common.data_dir,
             log_format: args.common.log_format,
+            trust_proxy: args.trust_proxy,
         })
     }
 }
@@ -172,5 +183,29 @@ mod tests {
     fn rejects_non_http_base_urls() {
         assert!(validate_base_url("ftp://example.com").is_err());
         assert!(validate_base_url("not a url").is_err());
+    }
+
+    #[test]
+    fn trust_proxy_defaults_to_false_and_accepts_a_value() {
+        let default = Cli::try_parse_from(["tld", "serve", "--base-url", "http://localhost:8080"])
+            .expect("parse");
+        let Command::Serve(args) = default.command else {
+            panic!("expected serve");
+        };
+        assert!(!args.trust_proxy);
+
+        let enabled = Cli::try_parse_from([
+            "tld",
+            "serve",
+            "--base-url",
+            "http://localhost:8080",
+            "--trust-proxy",
+            "true",
+        ])
+        .expect("parse");
+        let Command::Serve(args) = enabled.command else {
+            panic!("expected serve");
+        };
+        assert!(args.trust_proxy);
     }
 }

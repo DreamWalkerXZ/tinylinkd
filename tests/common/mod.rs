@@ -1,13 +1,23 @@
 #![allow(dead_code)]
 
+use std::net::SocketAddr;
+
 use axum::Router;
 use axum::body::Body;
+use axum::extract::connect_info::ConnectInfo;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use tinylinkd::app::build_router;
+use tinylinkd::app::{AppConfig, build_router, build_router_with_config};
 use tinylinkd::db::Database;
 use tower::ServiceExt;
+
+/// The socket peer address attached to every test request. Production
+/// requests get this extension from `into_make_service_with_connect_info`.
+pub const TEST_PEER: SocketAddr = SocketAddr::new(
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 7)),
+    54321,
+);
 
 pub struct TestContext {
     pub app: Router,
@@ -23,7 +33,19 @@ impl TestContext {
         Self { app, db, _dir: dir }
     }
 
-    pub async fn send(&self, request: Request<Body>) -> TestResponse {
+    pub async fn with_config(base_url: &str, trust_proxy: bool) -> Self {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = Database::connect(dir.path()).await.expect("database");
+        let config = AppConfig::new(
+            url::Url::parse(base_url).expect("valid base URL"),
+            trust_proxy,
+        );
+        let app = build_router_with_config(db.clone(), config);
+        Self { app, db, _dir: dir }
+    }
+
+    pub async fn send(&self, mut request: Request<Body>) -> TestResponse {
+        request.extensions_mut().insert(ConnectInfo(TEST_PEER));
         let response = self.app.clone().oneshot(request).await.expect("response");
         let status = response.status();
         let headers = response.headers().clone();
@@ -45,6 +67,15 @@ impl TestContext {
         self.request(Method::GET, uri, token, None).await
     }
 
+    pub async fn get_with_headers(&self, uri: &str, headers: HeaderMap) -> TestResponse {
+        self.request_with_headers(Method::GET, uri, None, None, headers)
+            .await
+    }
+
+    pub async fn head(&self, uri: &str) -> TestResponse {
+        self.request(Method::HEAD, uri, None, None).await
+    }
+
     pub async fn post(&self, uri: &str, token: Option<&str>, body: Value) -> TestResponse {
         self.request(Method::POST, uri, token, Some(body)).await
     }
@@ -60,6 +91,18 @@ impl TestContext {
         token: Option<&str>,
         body: Option<Value>,
     ) -> TestResponse {
+        self.request_with_headers(method, uri, token, body, HeaderMap::new())
+            .await
+    }
+
+    pub async fn request_with_headers(
+        &self,
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+        headers: HeaderMap,
+    ) -> TestResponse {
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(token) = token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
@@ -71,7 +114,11 @@ impl TestContext {
             }
             None => Body::empty(),
         };
-        self.send(builder.body(body).expect("request")).await
+        let mut request = builder.body(body).expect("request");
+        for (name, value) in &headers {
+            request.headers_mut().insert(name, value.clone());
+        }
+        self.send(request).await
     }
 }
 

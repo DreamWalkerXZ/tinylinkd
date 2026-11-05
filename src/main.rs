@@ -1,4 +1,5 @@
 use std::io::{BufRead, IsTerminal, Write};
+use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
@@ -6,7 +7,7 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use tracing::info;
 
-use tinylinkd::app::build_router;
+use tinylinkd::app::{AppConfig, build_router_with_config};
 use tinylinkd::bootstrap::{BootstrapAdmin, bootstrap_admin};
 use tinylinkd::config::{AdminCommand, Cli, Command, Config, TokenCommand};
 use tinylinkd::db::Database;
@@ -118,18 +119,25 @@ fn read_password() -> Result<String> {
 async fn serve(config: Config) -> Result<()> {
     let db = Database::connect(&config.data_dir).await?;
     bootstrap_admin(&db, BootstrapAdmin::from_env()).await?;
-    let app = build_router(db);
+    let app = build_router_with_config(
+        db,
+        AppConfig::new(config.base_url.clone(), config.trust_proxy),
+    );
     let shutdown = shutdown_signal();
     let listener = TcpListener::bind(config.listen_addr).await?;
     info!(
         addr = %listener.local_addr()?,
         base_url = %config.base_url,
+        trust_proxy = config.trust_proxy,
         "tinylinkd listening"
     );
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
     Ok(())
 }
 

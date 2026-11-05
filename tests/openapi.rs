@@ -21,6 +21,8 @@ async fn openapi_document_covers_auth_and_token_routes() {
         "/_/api/v1/me",
         "/_/api/v1/tokens",
         "/_/api/v1/tokens/{id}",
+        "/_/api/v1/links",
+        "/_/api/v1/links/{id}",
         "/_/api/v1/invites",
         "/_/api/v1/invites/{id}",
         "/_/api/v1/invites/{token}",
@@ -38,6 +40,15 @@ async fn openapi_document_covers_auth_and_token_routes() {
     assert!(document["paths"]["/_/api/v1/tokens"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/tokens"]["post"].is_object());
     assert!(document["paths"]["/_/api/v1/tokens/{id}"]["delete"].is_object());
+    assert!(document["paths"]["/_/api/v1/links"]["get"].is_object());
+    assert!(document["paths"]["/_/api/v1/links"]["post"].is_object());
+    assert!(document["paths"]["/_/api/v1/links/{id}"]["get"].is_object());
+    assert!(
+        document["components"]["schemas"]
+            .get("LinkResponse")
+            .is_some(),
+        "missing LinkResponse schema: {document}"
+    );
     assert!(document["paths"]["/_/api/v1/invites"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/invites"]["post"].is_object());
     assert!(document["paths"]["/_/api/v1/invites/{id}"]["delete"].is_object());
