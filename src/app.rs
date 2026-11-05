@@ -10,6 +10,7 @@ use url::Url;
 
 use crate::db::Database;
 use crate::problems::ProblemDetails;
+use crate::sessions::LoginAttemptLimiter;
 use crate::unlock::PasswordAttemptLimiter;
 
 /// Deployment configuration needed by request handlers.
@@ -46,6 +47,7 @@ pub struct AppState {
     pub db: Database,
     pub config: AppConfig,
     pub unlock_limiter: Arc<PasswordAttemptLimiter>,
+    pub login_limiter: Arc<LoginAttemptLimiter>,
 }
 
 /// Build the router with a test default base URL and proxy trust disabled.
@@ -58,6 +60,7 @@ pub fn build_router(db: Database) -> Router {
 pub fn build_router_with_config(db: Database, config: AppConfig) -> Router {
     Router::new()
         .route("/_/health", get(health))
+        .merge(crate::admin_ui::router())
         .merge(crate::api::router())
         .merge(crate::redirect::router())
         .fallback(fallback)
@@ -65,6 +68,7 @@ pub fn build_router_with_config(db: Database, config: AppConfig) -> Router {
             db,
             config,
             unlock_limiter: Arc::new(PasswordAttemptLimiter::new()),
+            login_limiter: Arc::new(LoginAttemptLimiter::new()),
         })
 }
 

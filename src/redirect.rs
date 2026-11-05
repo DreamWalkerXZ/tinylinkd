@@ -301,7 +301,11 @@ fn location_header(destination_url: &str, query: Option<&str>) -> Option<HeaderV
 
 /// The client IP for a request: the socket peer by default, or the first
 /// address in `X-Forwarded-For` when proxy trust is enabled.
-fn client_ip(peer: Option<SocketAddr>, headers: &HeaderMap, trust_proxy: bool) -> String {
+pub(crate) fn client_ip(
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    trust_proxy: bool,
+) -> String {
     if trust_proxy {
         let forwarded = headers
             .get("x-forwarded-for")
@@ -319,7 +323,7 @@ fn client_ip(peer: Option<SocketAddr>, headers: &HeaderMap, trust_proxy: bool) -
 /// The socket peer address attached by `into_make_service_with_connect_info`,
 /// or `None` when the router is called without connect info (for example in
 /// `oneshot` tests that do not inject a peer).
-pub struct ClientIp(Option<SocketAddr>);
+pub struct ClientIp(pub(crate) Option<SocketAddr>);
 
 impl FromRequestParts<AppState> for ClientIp {
     type Rejection = Infallible;
