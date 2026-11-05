@@ -1,0 +1,79 @@
+{% extends "admin_base.html" %}
+{% block title %}Invites - {{ nav.instance_name }}{% endblock %}
+{% block content %}
+<h1>Invites</h1>
+
+{% match created %}
+{% when Some with (invite) %}
+<section class="notice" role="status">
+  <h2>Invite created</h2>
+  <p>Share this one-time token with the person you are inviting. It is shown only once and cannot be recovered.</p>
+  <p><code>{{ invite.token }}</code></p>
+  <p class="muted">Valid until {{ invite.expires_at }}. The invitee sets their own username, password, and optional email.</p>
+</section>
+{% when None %}
+{% endmatch %}
+
+{% match error %}
+{% when Some with (message) %}
+<p class="error" role="alert">{{ message }}</p>
+{% when None %}
+{% endmatch %}
+
+<form class="actions" method="post" action="/_/invites">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button class="primary" type="submit">Create an Invite</button>
+</form>
+
+<p class="muted">{{ total }} Invite{% if total != 1 %}s{% endif %}. Invites are valid for 7 days and can be used once.</p>
+
+{% if invites.is_empty() %}
+<p>No Invites yet.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Status</th>
+      <th>Created</th>
+      <th>Expires</th>
+      <th>Created by</th>
+      <th>Used</th>
+      <th>Revoked</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for invite in invites %}
+    <tr>
+      <td><span class="badge">{{ invite.status }}</span></td>
+      <td>{{ invite.created_at }}</td>
+      <td>{{ invite.expires_at }}</td>
+      <td>{{ invite.created_by }}</td>
+      <td>{% match invite.used_at %}{% when Some with (timestamp) %}{{ timestamp }}{% when None %}-{% endmatch %}</td>
+      <td>{% match invite.revoked_at %}{% when Some with (timestamp) %}{{ timestamp }}{% when None %}-{% endmatch %}</td>
+      <td class="actions">
+        {% if invite.can_revoke %}
+        <form class="inline" method="post" action="/_/invites/{{ invite.id }}/revoke">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="danger" type="submit">Revoke</button>
+        </form>
+        {% else %}
+        -
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+{% if has_previous || has_next %}
+<p class="actions">
+  {% if has_previous %}<a href="/_/invites?page={{ page - 1 }}">Previous</a>{% endif %}
+  <span class="muted">Page {{ page }}</span>
+  {% if has_next %}<a href="/_/invites?page={{ page + 1 }}">Next</a>{% endif %}
+</p>
+{% endif %}
+{% endblock %}

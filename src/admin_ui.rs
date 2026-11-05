@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use crate::analytics::{self, TimeRange};
 use crate::app::AppState;
+use crate::invites;
 use crate::links;
 use crate::redirect::{ClientIp, client_ip};
 use crate::sessions;
@@ -29,6 +30,13 @@ pub fn router() -> Router<AppState> {
         .route("/_/links/{id}", get(link_detail).post(update_link))
         .route("/_/links/{id}/edit", get(edit_link_page))
         .route("/_/links/{id}/delete", axum::routing::post(delete_link))
+        .route("/_/users", get(users_page))
+        .route("/_/users/{id}/disable", axum::routing::post(user_disable))
+        .route("/_/users/{id}/enable", axum::routing::post(user_enable))
+        .route("/_/users/{id}/delete", axum::routing::post(user_delete))
+        .route("/_/invites", get(invites_page).post(invite_create))
+        .route("/_/invites/{id}/revoke", axum::routing::post(invite_revoke))
+        .route("/_/settings", get(settings_page).post(settings_update))
         .route("/_/static/admin.css", get(admin_css))
 }
 
@@ -41,6 +49,7 @@ pub struct SessionUser {
 
 pub enum SessionRejection {
     Login,
+    Forbidden,
     Internal,
 }
 
@@ -54,6 +63,11 @@ impl IntoResponse for SessionRejection {
                     .insert(header::LOCATION, HeaderValue::from_static("/_/login"));
                 response
             }
+            Self::Forbidden => error_page(
+                StatusCode::FORBIDDEN,
+                "Forbidden",
+                "You do not have permission to access this page.",
+            ),
             Self::Internal => error_page(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal Server Error",
@@ -82,6 +96,25 @@ impl FromRequestParts<AppState> for SessionUser {
                 Err(SessionRejection::Internal)
             }
         }
+    }
+}
+
+/// The Admin behind a browser session. A signed-in non-Admin gets 403; an
+/// unauthenticated browser is redirected to the login page.
+pub struct AdminUser(pub SessionUser);
+
+impl FromRequestParts<AppState> for AdminUser {
+    type Rejection = SessionRejection;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let session_user = SessionUser::from_request_parts(parts, state).await?;
+        if session_user.user.role != Role::Admin {
+            return Err(SessionRejection::Forbidden);
+        }
+        Ok(Self(session_user))
     }
 }
 
@@ -619,6 +652,8 @@ struct EditLinkForm {
     expires_at: Option<String>,
     #[serde(default)]
     remove_expiry: Option<String>,
+    #[serde(default)]
+    owner_id: Option<i64>,
 }
 
 impl EditLinkForm {
@@ -654,7 +689,25 @@ struct EditLinkTemplate<'a> {
     slug: &'a str,
     expires_at: &'a str,
     has_password: bool,
+    is_admin: bool,
+    owners: Vec<OwnerOption>,
     error: Option<&'a str>,
+}
+
+/// The owner selector choices an Admin gets on the Link edit form.
+async fn owner_options(
+    db: &crate::db::Database,
+    selected_id: i64,
+) -> Result<Vec<OwnerOption>, crate::error::ApiError> {
+    let (users, _) = users::list_users(db, 10_000, 0).await?;
+    Ok(users
+        .into_iter()
+        .map(|user| OwnerOption {
+            id: user.id,
+            username: user.username,
+            selected: user.id == selected_id,
+        })
+        .collect())
 }
 
 async fn edit_link_page(
@@ -697,6 +750,22 @@ async fn edit_link_page(
             );
         }
     };
+    let is_admin = session_user.user.role == Role::Admin;
+    let owners = if is_admin {
+        match owner_options(&state.db, link.owner_id).await {
+            Ok(owners) => owners,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to list Link owners");
+                return error_page(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                    "An unexpected error occurred.",
+                );
+            }
+        }
+    } else {
+        Vec::new()
+    };
     let template = EditLinkTemplate {
         nav: Nav::new(
             &instance_settings.instance_name,
@@ -709,6 +778,8 @@ async fn edit_link_page(
         slug: &link.slug,
         expires_at: link.expires_at.as_deref().unwrap_or(""),
         has_password: link.has_password,
+        is_admin,
+        owners,
         error: None,
     };
     render_edit_link(&template, StatusCode::OK)
@@ -780,7 +851,7 @@ async fn update_link(
         links::LinkChanges {
             destination_url: Some(form.destination_url.clone()),
             slug: Some(form.slug.trim().to_string()),
-            owner_id: None,
+            owner_id: form.owner_id,
             password: form.password_change(),
             expires_at: form.expiry_change(),
         },
@@ -825,6 +896,22 @@ async fn update_link(
                 }
             };
             let message = error.to_string();
+            let is_admin = session_user.user.role == Role::Admin;
+            let owners = if is_admin {
+                match owner_options(&state.db, form.owner_id.unwrap_or(link.owner_id)).await {
+                    Ok(owners) => owners,
+                    Err(owners_error) => {
+                        tracing::error!(error = %owners_error, "failed to list Link owners");
+                        return error_page(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Internal Server Error",
+                            "An unexpected error occurred.",
+                        );
+                    }
+                }
+            } else {
+                Vec::new()
+            };
             let template = EditLinkTemplate {
                 nav: Nav::new(
                     &instance_settings.instance_name,
@@ -837,6 +924,8 @@ async fn update_link(
                 slug: &form.slug,
                 expires_at: form.expires_at.as_deref().unwrap_or(""),
                 has_password: link.has_password,
+                is_admin,
+                owners,
                 error: Some(&message),
             };
             render_edit_link(&template, status)
@@ -927,6 +1016,686 @@ async fn delete_link(
         .headers_mut()
         .insert(header::LOCATION, HeaderValue::from_static("/_/links"));
     response
+}
+
+/// A pagination query shared by the Admin list pages.
+#[derive(Debug, Deserialize)]
+struct PageQuery {
+    page: Option<i64>,
+}
+
+/// A 303 redirect to a fixed admin UI path.
+fn see_other(location: &'static str) -> Response {
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    response
+        .headers_mut()
+        .insert(header::LOCATION, HeaderValue::from_static(location));
+    response
+}
+
+#[derive(Debug, Clone)]
+struct UserRow {
+    id: i64,
+    username: String,
+    email: Option<String>,
+    role: &'static str,
+    disabled: bool,
+    disabled_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    link_count: i64,
+}
+
+#[derive(Template)]
+#[template(path = "admin_users.html")]
+struct UsersTemplate<'a> {
+    nav: Nav<'a>,
+    users: Vec<UserRow>,
+    total: i64,
+    page: i64,
+    has_previous: bool,
+    has_next: bool,
+    error: Option<&'a str>,
+    csrf_token: &'a str,
+}
+
+async fn users_page(
+    State(state): State<AppState>,
+    AdminUser(session_user): AdminUser,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    render_users(
+        &state,
+        &session_user,
+        query.page.unwrap_or(1).max(1),
+        None,
+        StatusCode::OK,
+    )
+    .await
+}
+
+async fn render_users(
+    state: &AppState,
+    session_user: &SessionUser,
+    page: i64,
+    error: Option<&str>,
+    status: StatusCode,
+) -> Response {
+    let instance_settings = match settings::load(&state.db).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load Instance settings");
+            return error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            );
+        }
+    };
+    let offset = (page - 1).saturating_mul(UI_PAGE_LIMIT);
+    let (found, total) = match users::list_users(&state.db, UI_PAGE_LIMIT, offset).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list Users");
+            return error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            );
+        }
+    };
+    let counts = match link_counts(&state.db).await {
+        Ok(counts) => counts,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to count the Links owned by each User");
+            std::collections::HashMap::new()
+        }
+    };
+    let rows = found
+        .into_iter()
+        .map(|user| {
+            let disabled = user.disabled_at.is_some();
+            UserRow {
+                id: user.id,
+                username: user.username,
+                email: user.email,
+                role: user.role.as_str(),
+                disabled,
+                disabled_at: user.disabled_at,
+                created_at: user.created_at,
+                updated_at: user.updated_at,
+                link_count: counts.get(&user.id).copied().unwrap_or(0),
+            }
+        })
+        .collect::<Vec<_>>();
+    let template = UsersTemplate {
+        nav: Nav::new(
+            &instance_settings.instance_name,
+            &session_user.session,
+            &session_user.user,
+        ),
+        users: rows,
+        total,
+        page,
+        has_previous: page > 1,
+        has_next: offset + UI_PAGE_LIMIT < total,
+        error,
+        csrf_token: &session_user.session.csrf_token,
+    };
+    match template.render() {
+        Ok(html) => html_response(status, html),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to render the Users page");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
+}
+
+async fn link_counts(
+    db: &crate::db::Database,
+) -> Result<std::collections::HashMap<i64, i64>, sqlx::Error> {
+    let rows: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT owner_id, COUNT(*) FROM links GROUP BY owner_id")
+            .fetch_all(db.read_pool())
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
+async fn user_disable(
+    State(state): State<AppState>,
+    AdminUser(session_user): AdminUser,
+    Path(user_id): Path<i64>,
+    form: Result<Form<CsrfForm>, FormRejection>,
+) -> Response {
+    set_user_disabled(state, session_user, user_id, true, form).await
+}
+
+async fn user_enable(
+    State(state): State<AppState>,
+    AdminUser(session_user): AdminUser,
+    Path(user_id): Path<i64>,
+    form: Result<Form<CsrfForm>, FormRejection>,
+) -> Response {
+    set_user_disabled(state, session_user, user_id, false, form).await
+}
+
+async fn set_user_disabled(
+    state: AppState,
+    session_user: SessionUser,
+    user_id: i64,
+    disabled: bool,
+    form: Result<Form<CsrfForm>, FormRejection>,
+) -> Response {
+    let Ok(Form(form)) = form else {
+        return error_page(
+            StatusCode::FORBIDDEN,
+            "Forbidden",
+            "The form's CSRF token is missing or invalid.",
+        );
+    };
+    if let Some(response) = require_csrf(&session_user.session, &form.csrf_token) {
+        return response;
+    }
+    match users::update_user(
+        &state.db,
+        user_id,
+        users::UserChanges {
+            email: None,
+            disabled: Some(disabled),
+        },
+    )
+    .await
+    {
+        Ok(_) => see_other("/_/users"),
+        Err(error) if error.status() == StatusCode::NOT_FOUND => error_page(
+            StatusCode::NOT_FOUND,
+            "Not Found",
+            "The User does not exist.",
+        ),
+        Err(error) if error.status().is_client_error() => {
+            let message = error.to_string();
+            render_users(&state, &session_user, 1, Some(&message), error.status()).await
+        }
+        Err(error) => {
+            tracing::error!(error = %error, user_id, "failed to change a User's disabled status");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteUserForm {
+    csrf_token: String,
+    #[serde(default)]
+    confirm: Option<String>,
+}
+
+async fn user_delete(
+    State(state): State<AppState>,
+    AdminUser(session_user): AdminUser,
+    Path(user_id): Path<i64>,
+    form: Result<Form<DeleteUserForm>, FormRejection>,
+) -> Response {
+    let Ok(Form(form)) = form else {
+        return error_page(
+            StatusCode::FORBIDDEN,
+            "Forbidden",
+            "The form's CSRF token is missing or invalid.",
+        );
+    };
+    if let Some(response) = require_csrf(&session_user.session, &form.csrf_token) {
+        return response;
+    }
+    if form.confirm.is_none() {
+        return error_page(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Confirmation required",
+            "Confirm that you want to delete this User before submitting the form.",
+        );
+    }
+    match users::delete_user(&state.db, user_id).await {
+        Ok(()) => see_other("/_/users"),
+        Err(error) if error.status() == StatusCode::NOT_FOUND => error_page(
+            StatusCode::NOT_FOUND,
+            "Not Found",
+            "The User does not exist.",
+        ),
+        Err(error) if error.status().is_client_error() => {
+            let message = error.to_string();
+            render_users(&state, &session_user, 1, Some(&message), error.status()).await
+        }
+        Err(error) => {
+            tracing::error!(error = %error, user_id, "failed to delete a User");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct InviteRow {
+    id: i64,
+    status: &'static str,
+    created_at: String,
+    expires_at: String,
+    used_at: Option<String>,
+    revoked_at: Option<String>,
+    created_by: String,
+    can_revoke: bool,
+}
+
+/// The one-time Invite credential rendered immediately after creation. It is
+/// held only for this response; the database stores just its hash.
+#[derive(Debug, Clone)]
+struct CreatedInviteView {
+    token: String,
+    expires_at: String,
+}
+
+#[derive(Template)]
+#[template(path = "admin_invites.html")]
+struct InvitesTemplate<'a> {
+    nav: Nav<'a>,
+    invites: Vec<InviteRow>,
+    total: i64,
+    page: i64,
+    has_previous: bool,
+    has_next: bool,
+    created: Option<CreatedInviteView>,
+    error: Option<&'a str>,
+    csrf_token: &'a str,
+}
+
+async fn invites_page(
+    State(state): State<AppState>,
+    AdminUser(session_user): AdminUser,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    render_invites(
+        &state,
+        &session_user,
+        query.page.unwrap_or(1).max(1),
+        None,
+        None,
+        StatusCode::OK,
+    )
+    .await
+}
+
+async fn render_invites(
+    state: &AppState,
+    session_user: &SessionUser,
+    page: i64,
+    created: Option<CreatedInviteView>,
+    error: Option<&str>,
+    status: StatusCode,
+) -> Response {
+    let instance_settings = match settings::load(&state.db).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load Instance settings");
+            return error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            );
+        }
+    };
+    let offset = (page - 1).saturating_mul(UI_PAGE_LIMIT);
+    let (found, total) = match invites::list_invites(&state.db, UI_PAGE_LIMIT, offset).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list Invites");
+            return error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            );
+        }
+    };
+    let created_by: std::collections::HashMap<i64, String> =
+        match users::list_users(&state.db, 10_000, 0).await {
+            Ok((users, _)) => users
+                .into_iter()
+                .map(|user| (user.id, user.username))
+                .collect(),
+            Err(error) => {
+                tracing::error!(error = %error, "failed to list Users for the Invite list");
+                std::collections::HashMap::new()
+            }
+        };
+    let rows = found
+        .into_iter()
+        .map(|invite| {
+            let can_revoke = invite.used_at.is_none() && invite.revoked_at.is_none();
+            InviteRow {
+                id: invite.id,
+                status: invite.status.as_str(),
+                created_at: invite.created_at,
+                expires_at: invite.expires_at,
+                used_at: invite.used_at,
+                revoked_at: invite.revoked_at,
+                created_by: created_by
+                    .get(&invite.created_by)
+                    .cloned()
+                    .unwrap_or_else(|| format!("User #{}", invite.created_by)),
+                can_revoke,
+            }
+        })
+        .collect::<Vec<_>>();
+    let template = InvitesTemplate {
+        nav: Nav::new(
+            &instance_settings.instance_name,
+            &session_user.session,
+            &session_user.user,
+        ),
+        invites: rows,
+        total,
+        page,
+        has_previous: page > 1,
+        has_next: offset + UI_PAGE_LIMIT < total,
+        created,
+        error,
+        csrf_token: &session_user.session.csrf_token,
+    };
+    match template.render() {
+        Ok(html) => html_response(status, html),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to render the Invites page");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
+}
+
+async fn invite_create(
+    State(state): State<AppState>,
+    AdminUser(session_user): AdminUser,
+    form: Result<Form<CsrfForm>, FormRejection>,
+) -> Response {
+    let Ok(Form(form)) = form else {
+        return error_page(
+            StatusCode::FORBIDDEN,
+            "Forbidden",
+            "The form's CSRF token is missing or invalid.",
+        );
+    };
+    if let Some(response) = require_csrf(&session_user.session, &form.csrf_token) {
+        return response;
+    }
+    match invites::create_invite(&state.db, session_user.user.id).await {
+        Ok(created) => {
+            let view = CreatedInviteView {
+                token: created.plaintext,
+                expires_at: created.expires_at,
+            };
+            render_invites(
+                &state,
+                &session_user,
+                1,
+                Some(view),
+                None,
+                StatusCode::CREATED,
+            )
+            .await
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "failed to create an Invite");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
+}
+
+async fn invite_revoke(
+    State(state): State<AppState>,
+    AdminUser(session_user): AdminUser,
+    Path(invite_id): Path<i64>,
+    form: Result<Form<CsrfForm>, FormRejection>,
+) -> Response {
+    let Ok(Form(form)) = form else {
+        return error_page(
+            StatusCode::FORBIDDEN,
+            "Forbidden",
+            "The form's CSRF token is missing or invalid.",
+        );
+    };
+    if let Some(response) = require_csrf(&session_user.session, &form.csrf_token) {
+        return response;
+    }
+    match invites::revoke_invite(&state.db, invite_id).await {
+        Ok(()) => see_other("/_/invites"),
+        Err(error) if error.status() == StatusCode::NOT_FOUND => error_page(
+            StatusCode::NOT_FOUND,
+            "Not Found",
+            "The Invite does not exist.",
+        ),
+        Err(error) if error.status().is_client_error() => {
+            let message = error.to_string();
+            render_invites(
+                &state,
+                &session_user,
+                1,
+                None,
+                Some(&message),
+                error.status(),
+            )
+            .await
+        }
+        Err(error) => {
+            tracing::error!(error = %error, invite_id, "failed to revoke an Invite");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
+}
+
+/// The editable Instance settings as shown in the form. Values are kept as
+/// submitted strings so an invalid entry can be redisplayed unchanged.
+#[derive(Debug, Clone)]
+struct SettingsFormValues {
+    instance_name: String,
+    timezone: String,
+    click_retention_days: String,
+    password_unlock_ttl_seconds: String,
+}
+
+impl SettingsFormValues {
+    fn from_settings(settings: &settings::InstanceSettings) -> Self {
+        Self {
+            instance_name: settings.instance_name.clone(),
+            timezone: settings.timezone.clone(),
+            click_retention_days: settings.click_retention_days.to_string(),
+            password_unlock_ttl_seconds: settings.password_unlock_ttl_seconds.to_string(),
+        }
+    }
+}
+
+#[derive(Template)]
+#[template(path = "admin_settings.html")]
+struct SettingsTemplate<'a> {
+    nav: Nav<'a>,
+    values: SettingsFormValues,
+    error: Option<&'a str>,
+    csrf_token: &'a str,
+}
+
+fn render_settings_page(
+    session_user: &SessionUser,
+    instance_name: &str,
+    values: SettingsFormValues,
+    error: Option<&str>,
+    status: StatusCode,
+) -> Response {
+    let template = SettingsTemplate {
+        nav: Nav::new(instance_name, &session_user.session, &session_user.user),
+        values,
+        error,
+        csrf_token: &session_user.session.csrf_token,
+    };
+    match template.render() {
+        Ok(html) => html_response(status, html),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to render the Settings page");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
+}
+
+async fn render_settings_error(
+    state: &AppState,
+    session_user: &SessionUser,
+    values: SettingsFormValues,
+    message: String,
+    status: StatusCode,
+) -> Response {
+    match settings::load(&state.db).await {
+        Ok(current) => render_settings_page(
+            session_user,
+            &current.instance_name,
+            values,
+            Some(&message),
+            status,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load Instance settings");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
+}
+
+async fn settings_page(
+    State(state): State<AppState>,
+    AdminUser(session_user): AdminUser,
+) -> Response {
+    match settings::load(&state.db).await {
+        Ok(current) => {
+            let values = SettingsFormValues::from_settings(&current);
+            render_settings_page(
+                &session_user,
+                &current.instance_name,
+                values,
+                None,
+                StatusCode::OK,
+            )
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load Instance settings");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SettingsForm {
+    csrf_token: String,
+    instance_name: String,
+    timezone: String,
+    click_retention_days: String,
+    password_unlock_ttl_seconds: String,
+}
+
+async fn settings_update(
+    State(state): State<AppState>,
+    AdminUser(session_user): AdminUser,
+    form: Result<Form<SettingsForm>, FormRejection>,
+) -> Response {
+    let Ok(Form(form)) = form else {
+        return error_page(
+            StatusCode::FORBIDDEN,
+            "Forbidden",
+            "The form's CSRF token is missing or invalid.",
+        );
+    };
+    if let Some(response) = require_csrf(&session_user.session, &form.csrf_token) {
+        return response;
+    }
+    let values = SettingsFormValues {
+        instance_name: form.instance_name.clone(),
+        timezone: form.timezone.clone(),
+        click_retention_days: form.click_retention_days.clone(),
+        password_unlock_ttl_seconds: form.password_unlock_ttl_seconds.clone(),
+    };
+    let click_retention_days = match form.click_retention_days.trim().parse::<i64>() {
+        Ok(value) => value,
+        Err(_) => {
+            return render_settings_error(
+                &state,
+                &session_user,
+                values,
+                "click_retention_days must be a whole number of days.".to_string(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            )
+            .await;
+        }
+    };
+    let password_unlock_ttl_seconds = match form.password_unlock_ttl_seconds.trim().parse::<i64>() {
+        Ok(value) => value,
+        Err(_) => {
+            return render_settings_error(
+                &state,
+                &session_user,
+                values,
+                "password_unlock_ttl_seconds must be a whole number of seconds.".to_string(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            )
+            .await;
+        }
+    };
+    let changes = settings::SettingsChanges {
+        instance_name: Some(form.instance_name),
+        timezone: Some(form.timezone),
+        click_retention_days: Some(click_retention_days),
+        password_unlock_ttl_seconds: Some(password_unlock_ttl_seconds),
+    };
+    match settings::update(&state.db, changes).await {
+        Ok(_) => see_other("/_/settings"),
+        Err(error) if error.status().is_client_error() => {
+            let status = error.status();
+            let message = error.to_string();
+            render_settings_error(&state, &session_user, values, message, status).await
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "failed to update Instance settings");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            )
+        }
+    }
 }
 
 /// The root path: send a signed-in browser to the Link list and everyone else

@@ -1,0 +1,74 @@
+{% extends "admin_base.html" %}
+{% block title %}Users - {{ nav.instance_name }}{% endblock %}
+{% block content %}
+<h1>Users</h1>
+
+{% match error %}
+{% when Some with (message) %}
+<p class="error" role="alert">{{ message }}</p>
+{% when None %}
+{% endmatch %}
+
+<p class="muted">{{ total }} User{% if total != 1 %}s{% endif %}. New Users join through an Invite.</p>
+
+{% if users.is_empty() %}
+<p>No Users yet.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Username</th>
+      <th>Email</th>
+      <th>Role</th>
+      <th>Status</th>
+      <th>Links</th>
+      <th>Created</th>
+      <th>Updated</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for user in users %}
+    <tr>
+      <td>{{ user.username }}</td>
+      <td>{% match user.email %}{% when Some with (email) %}{{ email }}{% when None %}-{% endmatch %}</td>
+      <td><span class="badge">{{ user.role }}</span></td>
+      <td>
+        {% if user.disabled %}
+        <span class="badge">disabled</span>
+        {% match user.disabled_at %}{% when Some with (timestamp) %}<span class="muted">since {{ timestamp }}</span>{% when None %}{% endmatch %}
+        {% else %}
+        active
+        {% endif %}
+      </td>
+      <td>{{ user.link_count }}</td>
+      <td>{{ user.created_at }}</td>
+      <td>{{ user.updated_at }}</td>
+      <td class="actions">
+        <form class="inline" method="post" action="/_/users/{{ user.id }}/{% if user.disabled %}enable{% else %}disable{% endif %}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">{% if user.disabled %}Enable{% else %}Disable{% endif %}</button>
+        </form>
+        <form class="inline" method="post" action="/_/users/{{ user.id }}/delete">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label><input type="checkbox" name="confirm" value="1" required> Delete</label>
+          <button class="danger" type="submit">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted">A User can be deleted only while they own no Links; transfer or delete their Links first.</p>
+{% endif %}
+
+{% if has_previous || has_next %}
+<p class="actions">
+  {% if has_previous %}<a href="/_/users?page={{ page - 1 }}">Previous</a>{% endif %}
+  <span class="muted">Page {{ page }}</span>
+  {% if has_next %}<a href="/_/users?page={{ page + 1 }}">Next</a>{% endif %}
+</p>
+{% endif %}
+{% endblock %}

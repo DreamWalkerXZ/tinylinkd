@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::{StatusCode, Uri};
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -58,18 +59,75 @@ pub fn build_router(db: Database) -> Router {
 }
 
 pub fn build_router_with_config(db: Database, config: AppConfig) -> Router {
+    let state = AppState {
+        db,
+        config,
+        unlock_limiter: Arc::new(PasswordAttemptLimiter::new()),
+        login_limiter: Arc::new(LoginAttemptLimiter::new()),
+    };
     Router::new()
         .route("/_/health", get(health))
         .merge(crate::admin_ui::router())
         .merge(crate::api::router())
         .merge(crate::redirect::router())
         .fallback(fallback)
-        .with_state(AppState {
-            db,
-            config,
-            unlock_limiter: Arc::new(PasswordAttemptLimiter::new()),
-            login_limiter: Arc::new(LoginAttemptLimiter::new()),
-        })
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            refresh_session_cookie,
+        ))
+        .with_state(state)
+}
+
+/// Re-issue the browser session cookie on authenticated admin UI responses.
+///
+/// The server-side session row already slides its 7-day idle expiry on every
+/// request; without this middleware the browser cookie would still expire at
+/// its original 7-day mark and sign an active User out.
+async fn refresh_session_cookie(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let is_admin_ui = path == "/" || (path.starts_with("/_/") && !path.starts_with("/_/api/"));
+    let token = if is_admin_ui {
+        crate::sessions::cookie_value(request.headers(), crate::sessions::SESSION_COOKIE_NAME)
+    } else {
+        None
+    };
+    let mut response = next.run(request).await;
+    let Some(token) = token else {
+        return response;
+    };
+    let session_cookie_prefix = format!("{}=", crate::sessions::SESSION_COOKIE_NAME);
+    let already_sets_session = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| value.starts_with(&session_cookie_prefix));
+    if already_sets_session {
+        return response;
+    }
+    match crate::sessions::is_valid(&state.db, &token).await {
+        Ok(true) => {
+            let secure = state.config.base_url.scheme() == "https";
+            let cookie = crate::sessions::session_set_cookie(&token, secure);
+            match HeaderValue::from_str(&cookie) {
+                Ok(value) => {
+                    response.headers_mut().append(header::SET_COOKIE, value);
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to build a refreshed session cookie");
+                }
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to check a session for cookie refresh");
+        }
+    }
+    response
 }
 
 async fn fallback(uri: Uri) -> Response {

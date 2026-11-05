@@ -20,6 +20,19 @@
   <input id="slug" name="slug" type="text" value="{{ slug }}" required>
   <p class="muted">Changing the Slug stops the old short URL immediately; another Link may claim it.</p>
 
+  {% if is_admin %}
+  <fieldset>
+    <legend>Owner</legend>
+    <label for="owner_id">Owner</label>
+    <select id="owner_id" name="owner_id">
+      {% for owner in owners %}
+      <option value="{{ owner.id }}"{% if owner.selected %} selected{% endif %}>{{ owner.username }}</option>
+      {% endfor %}
+    </select>
+    <p class="muted">Transfer this Link to another User. The previous owner loses access immediately.</p>
+  </fieldset>
+  {% endif %}
+
   <fieldset>
     <legend>Password</legend>
     <p class="muted">{% if has_password %}This Link is currently protected.{% else %}This Link is not protected.{% endif %} Leave the field blank to keep the current setting.</p>
