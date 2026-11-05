@@ -46,6 +46,11 @@ async fn run(cli: Cli) -> Result<()> {
             info!(path = %db.path().display(), "migrations applied");
             Ok(())
         }
+        Command::Backup(args) => {
+            tinylinkd::db::backup(&args.common.data_dir, &args.output).await?;
+            info!(path = %args.output.display(), "wrote database backup");
+            Ok(())
+        }
         Command::Admin { command } => admin(command).await,
         Command::Token { command } => token(command).await,
     }
