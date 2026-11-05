@@ -119,6 +119,7 @@ async fn serve(config: Config) -> Result<()> {
     let db = Database::connect(&config.data_dir).await?;
     bootstrap_admin(&db, BootstrapAdmin::from_env()).await?;
     let app = build_router(db);
+    let shutdown = shutdown_signal();
     let listener = TcpListener::bind(config.listen_addr).await?;
     info!(
         addr = %listener.local_addr()?,
@@ -127,33 +128,33 @@ async fn serve(config: Config) -> Result<()> {
     );
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown)
         .await?;
     Ok(())
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
+#[cfg(unix)]
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("failed to install SIGINT handler");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
 
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+    async move {
+        tokio::select! {
+            _ = sigint.recv() => {},
+            _ = sigterm.recv() => {},
+        }
+        info!("shutdown signal received");
     }
+}
 
-    info!("shutdown signal received");
+#[cfg(not(unix))]
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    async move {
+        ctrl_c.await.expect("failed to install Ctrl+C handler");
+        info!("shutdown signal received");
+    }
 }
