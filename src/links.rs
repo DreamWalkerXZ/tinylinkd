@@ -52,6 +52,11 @@ impl Link {
             }
         }
     }
+
+    /// Whether the Link's expiry is at or before the current time.
+    pub fn is_expired(&self) -> bool {
+        self.status() == LinkStatus::Expired
+    }
 }
 
 /// Validate a Slug: 3-64 characters using ASCII `a-z`, `0-9`, and internal
@@ -216,6 +221,18 @@ async fn find_by_id_on(
 pub const SLUG_RELEASE_WARNING: &str =
     "The old Slug stops working immediately and may be reused by another Link.";
 
+/// Validate a Link expiry and normalize it to RFC 3339 UTC with the `Z`
+/// designator.
+pub fn normalize_expiry(value: &str) -> Result<String, ApiError> {
+    let parsed = timeutil::parse_rfc3339(value).map_err(|_| {
+        ApiError::validation(
+            "invalid_expires_at",
+            "expires_at must be an RFC 3339 timestamp.",
+        )
+    })?;
+    Ok(timeutil::format_rfc3339(parsed))
+}
+
 #[derive(Debug, Clone)]
 pub struct LinkChanges {
     pub destination_url: Option<String>,
@@ -225,6 +242,9 @@ pub struct LinkChanges {
     /// `None` leaves the password unchanged, `Some(None)` clears it, and
     /// `Some(Some(password))` sets or changes it.
     pub password: Option<Option<String>>,
+    /// `None` leaves the expiry unchanged, `Some(None)` clears it, and
+    /// `Some(Some(expires_at))` sets or extends it.
+    pub expires_at: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +289,11 @@ pub async fn update_link(
             Some(Some(hash))
         }
     };
+    let expires_at: Option<Option<String>> = match changes.expires_at.as_ref() {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(value)) => Some(Some(normalize_expiry(value)?)),
+    };
 
     let now = timeutil::now_rfc3339();
     let mut transaction = db.write_pool().begin_with("BEGIN IMMEDIATE").await?;
@@ -305,40 +330,38 @@ pub async fn update_link(
         .unwrap_or(&current.destination_url);
     let owner_changed = owner_id != current.owner_id;
     let password_changed = password_hash.is_some();
+    let expiry_changed = expires_at.is_some();
     let changed = slug_changed
         || destination_url != current.destination_url
         || owner_changed
-        || password_changed;
+        || password_changed
+        || expiry_changed;
     let mut warning = None;
     if changed {
-        if let Some(password_hash) = password_hash {
-            sqlx::query(
-                "UPDATE links
-                 SET slug = ?, destination_url = ?, owner_id = ?, password_hash = ?,
-                     password_version = password_version + 1, updated_at = ?
-                 WHERE id = ?",
-            )
-            .bind(slug)
-            .bind(destination_url)
-            .bind(owner_id)
-            .bind(password_hash)
-            .bind(&now)
-            .bind(link_id)
-            .execute(&mut *transaction)
-            .await?;
-        } else {
-            sqlx::query(
-                "UPDATE links SET slug = ?, destination_url = ?, owner_id = ?, updated_at = ?
-                 WHERE id = ?",
-            )
-            .bind(slug)
-            .bind(destination_url)
-            .bind(owner_id)
-            .bind(&now)
-            .bind(link_id)
-            .execute(&mut *transaction)
-            .await?;
-        }
+        let password_hash = password_hash.flatten();
+        let expires_at = expires_at.flatten();
+        sqlx::query(
+            "UPDATE links
+             SET slug = ?, destination_url = ?, owner_id = ?,
+                 password_hash = CASE WHEN ? THEN ? ELSE password_hash END,
+                 password_version =
+                     CASE WHEN ? THEN password_version + 1 ELSE password_version END,
+                 expires_at = CASE WHEN ? THEN ? ELSE expires_at END,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(slug)
+        .bind(destination_url)
+        .bind(owner_id)
+        .bind(i64::from(password_changed))
+        .bind(&password_hash)
+        .bind(i64::from(password_changed))
+        .bind(i64::from(expiry_changed))
+        .bind(&expires_at)
+        .bind(&now)
+        .bind(link_id)
+        .execute(&mut *transaction)
+        .await?;
         if slug_changed {
             warning = Some(SLUG_RELEASE_WARNING.to_string());
         }
@@ -445,14 +468,15 @@ fn push_list_filters<'a>(
     match filter.status {
         Some(LinkStatus::Active) => {
             builder
-                .push(" AND (l.expires_at IS NULL OR l.expires_at > ")
+                .push(" AND (l.expires_at IS NULL OR julianday(l.expires_at) > julianday(")
                 .push_bind(now)
-                .push(")");
+                .push("))");
         }
         Some(LinkStatus::Expired) => {
             builder
-                .push(" AND l.expires_at IS NOT NULL AND l.expires_at <= ")
-                .push_bind(now);
+                .push(" AND l.expires_at IS NOT NULL AND julianday(l.expires_at) <= julianday(")
+                .push_bind(now)
+                .push(")");
         }
         None => {}
     }

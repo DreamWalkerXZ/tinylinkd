@@ -710,6 +710,13 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
               "null"
             ]
           },
+          "expires_at": {
+            "description": "The Link's expiry as an RFC 3339 timestamp, stored and returned in UTC.\nOmit the field to leave the expiry unchanged; send `null` to remove it\nand make the Link permanent. A timestamp at or before the current time\nmakes the Link expired.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "owner_id": {
             "description": "Admin-only: transfer the Link to another existing User.",
             "format": "int64",
@@ -1583,7 +1590,7 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
                 }
               }
             },
-            "description": "The Destination URL or Slug is invalid."
+            "description": "The Destination URL, Slug, or expiry is invalid."
           }
         },
         "security": [

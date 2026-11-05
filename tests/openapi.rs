@@ -108,6 +108,12 @@ async fn openapi_document_covers_auth_and_token_routes() {
             .is_some(),
         "UpdateLinkRequest must accept owner_id: {document}"
     );
+    assert!(
+        document["components"]["schemas"]["UpdateLinkRequest"]["properties"]
+            .get("expires_at")
+            .is_some(),
+        "UpdateLinkRequest must accept expires_at: {document}"
+    );
     for schema in [
         "ClickResponse",
         "ClickListResponse",
