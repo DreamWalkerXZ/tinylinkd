@@ -62,6 +62,12 @@ async fn respond(
         }
     };
 
+    // Expiry is checked immediately after the Slug lookup and before the
+    // password check, so an Expired Link reveals nothing about its password.
+    if link.is_expired() {
+        return pages::expired(&slug);
+    }
+
     if link.has_password && !is_unlocked(&state, &link, &headers).await {
         return pages::password_form(StatusCode::OK, &slug, None);
     }
@@ -159,6 +165,10 @@ async fn unlock(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+
+    if link.is_expired() {
+        return pages::expired(&slug);
+    }
 
     if !link.has_password {
         let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
