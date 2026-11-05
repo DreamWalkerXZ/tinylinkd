@@ -334,6 +334,13 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
           },
           "updated_at": {
             "type": "string"
+          },
+          "warning": {
+            "description": "Present only when an update changed the Slug: the old short URL stops\nworking immediately and may be reused by another Link.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -497,6 +504,25 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
           "prefix",
           "created_at"
         ],
+        "type": "object"
+      },
+      "UpdateLinkRequest": {
+        "properties": {
+          "destination_url": {
+            "description": "The new absolute `http` or `https` URL the Link redirects to.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "description": "A new Slug. A Slug change returns a `warning` because the old short URL\nstops working immediately and may be reused by another Link.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "UserProfile": {
@@ -887,6 +913,43 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
               "format": "int64",
               "type": "integer"
             }
+          },
+          {
+            "description": "Filter by status: `active` or `expired`.",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Search the Slug and Destination URL.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort order: `created_at` (oldest first) or `-created_at` (newest first, the default).",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Admin-only: list only the Links owned by this User.",
+            "in": "query",
+            "name": "owner_id",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -898,7 +961,7 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
                 }
               }
             },
-            "description": "The current User's Links."
+            "description": "The current User's Links, or all Links for an Admin."
           },
           "401": {
             "content": {
@@ -910,6 +973,16 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
             },
             "description": "Missing, invalid, revoked, or expired API token."
           },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A non-Admin used the Admin-only `owner_id` filter."
+          },
           "422": {
             "content": {
               "application/problem+json": {
@@ -918,7 +991,7 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
                 }
               }
             },
-            "description": "Invalid pagination parameters."
+            "description": "Invalid pagination, status, or sort parameters."
           }
         },
         "security": [
@@ -995,6 +1068,64 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
       }
     },
     "/_/api/v1/links/{id}": {
+      "delete": {
+        "operationId": "delete_link",
+        "parameters": [
+          {
+            "description": "The Link id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The Link was hard-deleted with its Clicks, and its Slug was released."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Link belongs to another User and the caller is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Link."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "links"
+        ]
+      },
       "get": {
         "operationId": "get_link",
         "parameters": [
@@ -1049,6 +1180,101 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
               }
             },
             "description": "No such Link."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "links"
+        ]
+      },
+      "patch": {
+        "operationId": "update_link",
+        "parameters": [
+          {
+            "description": "The Link id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkResponse"
+                }
+              }
+            },
+            "description": "The Link was updated. A Slug change returns a `warning` because the old short URL stops working and may be reused."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Link belongs to another User and the caller is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Link."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested Slug is already taken."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Destination URL or Slug is invalid."
           }
         },
         "security": [

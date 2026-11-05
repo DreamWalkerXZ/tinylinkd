@@ -43,12 +43,32 @@ async fn openapi_document_covers_auth_and_token_routes() {
     assert!(document["paths"]["/_/api/v1/links"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/links"]["post"].is_object());
     assert!(document["paths"]["/_/api/v1/links/{id}"]["get"].is_object());
+    assert!(document["paths"]["/_/api/v1/links/{id}"]["patch"].is_object());
+    assert!(document["paths"]["/_/api/v1/links/{id}"]["delete"].is_object());
     assert!(
         document["components"]["schemas"]
             .get("LinkResponse")
             .is_some(),
         "missing LinkResponse schema: {document}"
     );
+    assert!(
+        document["components"]["schemas"]
+            .get("UpdateLinkRequest")
+            .is_some(),
+        "missing UpdateLinkRequest schema: {document}"
+    );
+    let list_links_params: Vec<&str> = document["paths"]["/_/api/v1/links"]["get"]["parameters"]
+        .as_array()
+        .expect("list_links parameters")
+        .iter()
+        .filter_map(|parameter| parameter["name"].as_str())
+        .collect();
+    for name in ["limit", "offset", "status", "q", "sort", "owner_id"] {
+        assert!(
+            list_links_params.contains(&name),
+            "missing list filter {name}: {list_links_params:?}"
+        );
+    }
     assert!(document["paths"]["/_/api/v1/invites"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/invites"]["post"].is_object());
     assert!(document["paths"]["/_/api/v1/invites/{id}"]["delete"].is_object());

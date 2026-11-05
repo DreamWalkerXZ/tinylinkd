@@ -25,7 +25,10 @@ pub fn router() -> Router<AppState> {
         .route("/_/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/_/api/v1/tokens/{id}", delete(revoke_token))
         .route("/_/api/v1/links", get(list_links).post(create_link))
-        .route("/_/api/v1/links/{id}", get(get_link))
+        .route(
+            "/_/api/v1/links/{id}",
+            get(get_link).patch(update_link).delete(delete_link),
+        )
         .route("/_/api/v1/invites", get(list_invites).post(create_invite))
         // Axum forbids two routes that differ only in the parameter name, so
         // the Admin revoke and public validate handlers share this route and
@@ -72,7 +75,9 @@ pub fn router() -> Router<AppState> {
         accept_password_reset,
         create_link,
         list_links,
-        get_link
+        get_link,
+        update_link,
+        delete_link
     ),
     components(schemas(
         UserProfile,
@@ -93,6 +98,7 @@ pub fn router() -> Router<AppState> {
         LinkListResponse,
         LinkStatus,
         CreateLinkRequest,
+        UpdateLinkRequest,
         ProblemDetails
     )),
     modifiers(&SecurityAddon)
@@ -250,11 +256,12 @@ fn pagination_problem(rejection: QueryRejection, instance: &str) -> ProblemDetai
 }
 
 fn resolve_pagination(
-    query: Query<Pagination>,
+    limit: Option<i64>,
+    offset: Option<i64>,
     instance: &str,
 ) -> Result<(i64, i64), ProblemDetails> {
-    let limit = query.limit.unwrap_or(DEFAULT_PAGE_LIMIT);
-    let offset = query.offset.unwrap_or(0);
+    let limit = limit.unwrap_or(DEFAULT_PAGE_LIMIT);
+    let offset = offset.unwrap_or(0);
     if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
         return Err(ProblemDetails::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -284,6 +291,15 @@ pub struct CreateLinkRequest {
     pub slug: Option<String>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateLinkRequest {
+    /// The new absolute `http` or `https` URL the Link redirects to.
+    pub destination_url: Option<String>,
+    /// A new Slug. A Slug change returns a `warning` because the old short URL
+    /// stops working immediately and may be reused by another Link.
+    pub slug: Option<String>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LinkResponse {
     pub id: i64,
@@ -299,6 +315,10 @@ pub struct LinkResponse {
     pub total_clicks: i64,
     pub human_clicks: i64,
     pub bot_clicks: i64,
+    /// Present only when an update changed the Slug: the old short URL stops
+    /// working immediately and may be reused by another Link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 impl LinkResponse {
@@ -318,7 +338,13 @@ impl LinkResponse {
             total_clicks: link.total_clicks,
             human_clicks: link.human_clicks,
             bot_clicks: link.bot_clicks,
+            warning: None,
         }
+    }
+
+    fn with_warning(mut self, warning: Option<String>) -> Self {
+        self.warning = warning;
+        self
     }
 }
 
@@ -365,6 +391,53 @@ pub struct LinkListResponse {
     pub offset: i64,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ListLinksQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    /// Filter by Link status: `active` or `expired`.
+    pub status: Option<String>,
+    /// Search text matched against the Slug and Destination URL.
+    pub q: Option<String>,
+    /// Sort order: `created_at` (oldest first) or `-created_at` (newest
+    /// first, the default).
+    pub sort: Option<String>,
+    /// Admin-only: list only the Links owned by this User.
+    pub owner_id: Option<i64>,
+}
+
+fn parse_link_status(
+    value: Option<&str>,
+    instance: &str,
+) -> Result<Option<LinkStatus>, ProblemDetails> {
+    match value {
+        None => Ok(None),
+        Some("active") => Ok(Some(LinkStatus::Active)),
+        Some("expired") => Ok(Some(LinkStatus::Expired)),
+        Some(_) => Err(ProblemDetails::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_status",
+            "Unprocessable Entity",
+            "status must be 'active' or 'expired'.",
+            instance,
+        )),
+    }
+}
+
+fn parse_link_sort(value: Option<&str>, instance: &str) -> Result<links::LinkSort, ProblemDetails> {
+    match value {
+        None | Some("-created_at") => Ok(links::LinkSort::CreatedAtDesc),
+        Some("created_at") => Ok(links::LinkSort::CreatedAtAsc),
+        Some(_) => Err(ProblemDetails::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_sort",
+            "Unprocessable Entity",
+            "sort must be 'created_at' or '-created_at'.",
+            instance,
+        )),
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/_/api/v1/links",
@@ -372,23 +445,50 @@ pub struct LinkListResponse {
     security(("bearerAuth" = [])),
     params(
         ("limit" = Option<i64>, Query, description = "Maximum number of Links to return (default 20, maximum 100)."),
-        ("offset" = Option<i64>, Query, description = "Number of Links to skip.")
+        ("offset" = Option<i64>, Query, description = "Number of Links to skip."),
+        ("status" = Option<String>, Query, description = "Filter by status: `active` or `expired`."),
+        ("q" = Option<String>, Query, description = "Search the Slug and Destination URL."),
+        ("sort" = Option<String>, Query, description = "Sort order: `created_at` (oldest first) or `-created_at` (newest first, the default)."),
+        ("owner_id" = Option<i64>, Query, description = "Admin-only: list only the Links owned by this User.")
     ),
     responses(
-        (status = 200, description = "The current User's Links.", body = LinkListResponse),
+        (status = 200, description = "The current User's Links, or all Links for an Admin.", body = LinkListResponse),
         (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid pagination parameters.", body = ProblemDetails, content_type = "application/problem+json")
+        (status = 403, description = "A non-Admin used the Admin-only `owner_id` filter.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid pagination, status, or sort parameters.", body = ProblemDetails, content_type = "application/problem+json")
     )
 )]
 async fn list_links(
     State(state): State<AppState>,
     user: CurrentUser,
     uri: Uri,
-    query: Result<Query<Pagination>, QueryRejection>,
+    query: Result<Query<ListLinksQuery>, QueryRejection>,
 ) -> Result<Json<LinkListResponse>, ProblemDetails> {
     let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    let (limit, offset) = resolve_pagination(query, uri.path())?;
-    let (links, total) = links::list_links(&state.db, user.user.id, limit, offset)
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
+    let is_admin = user.user.role == Role::Admin;
+    if query.owner_id.is_some() && !is_admin {
+        return Err(ProblemDetails::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Forbidden",
+            "Only Admins may filter Links by owner_id.",
+            uri.path(),
+        ));
+    }
+    let filter = links::LinkFilter {
+        owner_id: if is_admin {
+            query.owner_id
+        } else {
+            Some(user.user.id)
+        },
+        status: parse_link_status(query.status.as_deref(), uri.path())?,
+        q: query.q.clone(),
+        sort: parse_link_sort(query.sort.as_deref(), uri.path())?,
+        limit,
+        offset,
+    };
+    let (links, total) = links::list_links(&state.db, &filter)
         .await
         .map_err(|error| error.into_problem(uri.path()))?;
     Ok(Json(LinkListResponse {
@@ -440,6 +540,80 @@ async fn get_link(
     Ok(Json(LinkResponse::from_link(link, &state.config)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/_/api/v1/links/{id}",
+    tag = "links",
+    security(("bearerAuth" = [])),
+    params(("id" = i64, Path, description = "The Link id.")),
+    request_body = UpdateLinkRequest,
+    responses(
+        (status = 200, description = "The Link was updated. A Slug change returns a `warning` because the old short URL stops working and may be reused.", body = LinkResponse),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The Link belongs to another User and the caller is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such Link.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 409, description = "The requested Slug is already taken.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 422, description = "The Destination URL or Slug is invalid.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn update_link(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    uri: Uri,
+    path: Result<Path<i64>, PathRejection>,
+    payload: Result<Json<UpdateLinkRequest>, JsonRejection>,
+) -> Result<Json<LinkResponse>, ProblemDetails> {
+    let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Json(payload) =
+        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let updated = links::update_link(
+        &state.db,
+        link_id,
+        user.user.id,
+        user.user.role == Role::Admin,
+        links::LinkChanges {
+            destination_url: payload.destination_url,
+            slug: payload.slug,
+        },
+    )
+    .await
+    .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(Json(
+        LinkResponse::from_link(updated.link, &state.config).with_warning(updated.warning),
+    ))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/_/api/v1/links/{id}",
+    tag = "links",
+    security(("bearerAuth" = [])),
+    params(("id" = i64, Path, description = "The Link id.")),
+    responses(
+        (status = 204, description = "The Link was hard-deleted with its Clicks, and its Slug was released."),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The Link belongs to another User and the caller is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such Link.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn delete_link(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    uri: Uri,
+    path: Result<Path<i64>, PathRejection>,
+) -> Result<StatusCode, ProblemDetails> {
+    let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    links::delete_link(
+        &state.db,
+        link_id,
+        user.user.id,
+        user.user.role == Role::Admin,
+    )
+    .await
+    .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TokenListResponse {
     pub items: Vec<TokenResponse>,
@@ -470,7 +644,7 @@ async fn list_tokens(
     query: Result<Query<Pagination>, QueryRejection>,
 ) -> Result<Json<TokenListResponse>, ProblemDetails> {
     let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    let (limit, offset) = resolve_pagination(query, uri.path())?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
     let (items, total) = tokens::list_tokens(&state.db, user.user.id, limit, offset)
         .await
         .map_err(|error| error.into_problem(uri.path()))?;
@@ -610,7 +784,7 @@ async fn list_invites(
     query: Result<Query<Pagination>, QueryRejection>,
 ) -> Result<Json<InviteListResponse>, ProblemDetails> {
     let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    let (limit, offset) = resolve_pagination(query, uri.path())?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
     let (items, total) = invites::list_invites(&state.db, limit, offset)
         .await
         .map_err(|error| error.into_problem(uri.path()))?;

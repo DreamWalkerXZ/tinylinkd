@@ -9,6 +9,7 @@ use crate::problems::ProblemDetails;
 #[derive(Debug)]
 pub enum ApiError {
     Validation { code: &'static str, detail: String },
+    Forbidden { detail: String },
     Conflict { code: &'static str, detail: String },
     Gone { code: &'static str, detail: String },
     NotFound { detail: String },
@@ -27,6 +28,12 @@ impl ApiError {
     pub fn conflict(code: &'static str, detail: impl Into<String>) -> Self {
         Self::Conflict {
             code,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn forbidden(detail: impl Into<String>) -> Self {
+        Self::Forbidden {
             detail: detail.into(),
         }
     }
@@ -51,6 +58,7 @@ impl ApiError {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Forbidden { .. } => StatusCode::FORBIDDEN,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::Gone { .. } => StatusCode::GONE,
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
@@ -63,6 +71,9 @@ impl ApiError {
         match self {
             Self::Validation { code, detail } => {
                 ProblemDetails::new(status, code, "Unprocessable Entity", detail, instance)
+            }
+            Self::Forbidden { detail } => {
+                ProblemDetails::new(status, "forbidden", "Forbidden", detail, instance)
             }
             Self::Conflict { code, detail } => {
                 ProblemDetails::new(status, code, "Conflict", detail, instance)
@@ -87,6 +98,7 @@ impl fmt::Display for ApiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Validation { detail, .. }
+            | Self::Forbidden { detail }
             | Self::Conflict { detail, .. }
             | Self::Gone { detail, .. }
             | Self::NotFound { detail } => formatter.write_str(detail),
