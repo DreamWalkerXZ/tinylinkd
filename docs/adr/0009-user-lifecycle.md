@@ -1,0 +1,3 @@
+# Users are disabled by default and may self-delete only when link-less
+
+Admins disable Users rather than delete them: disabling blocks login and revokes API tokens while retaining the User's Links and Clicks. Deleting a User is allowed only when that User owns no Links; the Links must be transferred or deleted first. A User may delete their own account under the same rule, after deleting their own Links, and self-deletion requires the current password. This prevents orphaned Links and lost analytics while still giving Users an exit. Usernames are immutable after creation; emails are optional and editable.

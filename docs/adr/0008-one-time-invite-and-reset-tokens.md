@@ -1,0 +1,3 @@
+# One-time tokens for invites and password resets
+
+Invites and password resets use one-time bearer tokens instead of email or administrator-set temporary passwords. An invite token is 32 random bytes, stored only as a SHA-256 hash, valid for 7 days, single-use, and revocable by an Admin; the invitee sets their own username, password, and optional email. A password-reset token works the same way with a 24-hour lifetime. Because the Instance sends no email, the Admin delivers the token link out of band. This keeps administrators from learning user passwords and avoids building email infrastructure, at the cost of requiring a human to pass the link along.

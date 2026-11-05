@@ -1,0 +1,3 @@
+# Rust stack: axum, Tokio, sqlx, Askama
+
+The service is implemented in Rust with axum 0.8 on Tokio. SQLite access goes through sqlx with the bundled SQLite library and embedded `sqlx::migrate!` migrations; the few server-rendered pages use Askama, with static assets embedded via `include_str!`/`include_bytes!`. Password hashing uses the `argon2` crate (Argon2id), API authentication uses hashed bearer tokens, and password-unlock cookies are HMAC-signed. We chose this stack for a single static binary with strong typing and a mature async ecosystem; the main cost is that bundled SQLite makes cross-compilation a C-toolchain problem, handled by cargo-zigbuild.

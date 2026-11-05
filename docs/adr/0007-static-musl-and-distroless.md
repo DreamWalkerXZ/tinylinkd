@@ -1,0 +1,3 @@
+# Static musl binaries and distroless Docker images
+
+Linux releases are static musl binaries for amd64 and arm64, cross-compiled from macOS or CI with cargo-zigbuild; macOS arm64 is built natively. Docker images are multi-arch, based on `gcr.io/distroless/static-debian12:nonroot`, run as a non-root user, and mount persistent data at `/data`. TLS is terminated by a reverse proxy; the application serves plain HTTP on `127.0.0.1:8080` by default. This keeps the deliverable a single executable while still offering a container artifact, and avoids bundling TLS and certificate management into the application.
