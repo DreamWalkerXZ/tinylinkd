@@ -16,17 +16,33 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 axum = "0.8"
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
+getrandom = "0.3"
+rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 url = "2"
+utoipa = { version = "5", features = ["axum_extras"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
+insta = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+# Argon2id is intentionally expensive; compile the crypto crates optimized so
+# tests and debug builds are not dominated by password hashing.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

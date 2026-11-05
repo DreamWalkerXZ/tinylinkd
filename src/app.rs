@@ -1,21 +1,32 @@
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::db::Database;
+use crate::problems::ProblemDetails;
 
 #[derive(Clone)]
-struct AppState {
-    db: Database,
+pub struct AppState {
+    pub db: Database,
 }
 
 pub fn build_router(db: Database) -> Router {
     Router::new()
         .route("/_/health", get(health))
+        .merge(crate::api::router())
+        .fallback(fallback)
         .with_state(AppState { db })
+}
+
+async fn fallback(uri: Uri) -> Response {
+    if uri.path().starts_with("/_/api/") {
+        ProblemDetails::not_found("No such API route.", uri.path()).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 #[derive(Serialize)]

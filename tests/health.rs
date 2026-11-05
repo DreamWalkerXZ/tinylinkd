@@ -90,7 +90,7 @@ async fn connect_applies_embedded_migrations() {
             .fetch_one(db.read_pool())
             .await
             .expect("migrations");
-    assert_eq!(applied, 1);
+    assert!(applied >= 2, "expected embedded migrations to be applied");
 }
 
 #[tokio::test]
