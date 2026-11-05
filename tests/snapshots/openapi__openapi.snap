@@ -428,6 +428,7 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
             ]
           },
           "has_password": {
+            "description": "Whether the Link requires a password before it redirects.",
             "type": "boolean"
           },
           "human_clicks": {
@@ -687,6 +688,13 @@ expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
             "format": "int64",
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "password": {
+            "description": "A non-empty string sets or changes the Link's password; `null` clears\nit and makes the Link redirect without a password. Omit the field to\nleave the password unchanged.",
+            "type": [
+              "string",
               "null"
             ]
           },

@@ -29,6 +29,7 @@ pub struct Link {
     pub slug: String,
     pub destination_url: String,
     pub has_password: bool,
+    pub password_version: i64,
     pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -167,6 +168,7 @@ async fn create_with_generated_slug(
 const LINK_SELECT: &str = "
     l.id, l.owner_id, l.slug, l.destination_url,
     (l.password_hash IS NOT NULL) AS has_password,
+    l.password_version,
     l.expires_at, l.created_at, l.updated_at,
     (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id) AS total_clicks,
     (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id AND c.is_bot = 0) AS human_clicks,
@@ -180,6 +182,7 @@ fn link_from_row(row: &SqliteRow) -> Result<Link, ApiError> {
         slug: row.try_get("slug")?,
         destination_url: row.try_get("destination_url")?,
         has_password: row.try_get::<i64, _>("has_password")? != 0,
+        password_version: row.try_get("password_version")?,
         expires_at: row.try_get("expires_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -219,6 +222,9 @@ pub struct LinkChanges {
     pub slug: Option<String>,
     /// Admin-only: the User who will own the Link.
     pub owner_id: Option<i64>,
+    /// `None` leaves the password unchanged, `Some(None)` clears it, and
+    /// `Some(Some(password))` sets or changes it.
+    pub password: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +256,19 @@ pub async fn update_link(
     if let Some(slug) = changes.slug.as_deref() {
         validate_slug(slug)?;
     }
+    // Hash outside the write transaction: Argon2id is deliberately expensive
+    // and must not hold the SQLite writer lock.
+    let password_hash: Option<Option<String>> = match changes.password.as_ref() {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(password)) => {
+            crate::users::validate_password(password)?;
+            let hash = crate::auth::hash_password(password).map_err(|error| {
+                ApiError::internal(format!("failed to hash the Link password: {error}"))
+            })?;
+            Some(Some(hash))
+        }
+    };
 
     let now = timeutil::now_rfc3339();
     let mut transaction = db.write_pool().begin_with("BEGIN IMMEDIATE").await?;
@@ -285,20 +304,41 @@ pub async fn update_link(
         .as_deref()
         .unwrap_or(&current.destination_url);
     let owner_changed = owner_id != current.owner_id;
-    let changed = slug_changed || destination_url != current.destination_url || owner_changed;
+    let password_changed = password_hash.is_some();
+    let changed = slug_changed
+        || destination_url != current.destination_url
+        || owner_changed
+        || password_changed;
     let mut warning = None;
     if changed {
-        sqlx::query(
-            "UPDATE links SET slug = ?, destination_url = ?, owner_id = ?, updated_at = ?
-             WHERE id = ?",
-        )
-        .bind(slug)
-        .bind(destination_url)
-        .bind(owner_id)
-        .bind(&now)
-        .bind(link_id)
-        .execute(&mut *transaction)
-        .await?;
+        if let Some(password_hash) = password_hash {
+            sqlx::query(
+                "UPDATE links
+                 SET slug = ?, destination_url = ?, owner_id = ?, password_hash = ?,
+                     password_version = password_version + 1, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(slug)
+            .bind(destination_url)
+            .bind(owner_id)
+            .bind(password_hash)
+            .bind(&now)
+            .bind(link_id)
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE links SET slug = ?, destination_url = ?, owner_id = ?, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(slug)
+            .bind(destination_url)
+            .bind(owner_id)
+            .bind(&now)
+            .bind(link_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
         if slug_changed {
             warning = Some(SLUG_RELEASE_WARNING.to_string());
         }
@@ -448,6 +488,19 @@ pub async fn find_by_slug(db: &Database, slug: &str) -> Result<Option<Link>, Api
     .fetch_optional(db.read_pool())
     .await?;
     row.as_ref().map(link_from_row).transpose()
+}
+
+/// The stored password hash for a Link, used only to verify a visitor's
+/// password. The hash is never exposed through the API.
+pub async fn find_password_hash(db: &Database, link_id: i64) -> Result<Option<String>, ApiError> {
+    let row = sqlx::query("SELECT password_hash FROM links WHERE id = ?")
+        .bind(link_id)
+        .fetch_optional(db.read_pool())
+        .await?;
+    match row {
+        None => Ok(None),
+        Some(row) => Ok(row.try_get::<Option<String>, _>("password_hash")?),
+    }
 }
 
 /// Append a short URL's query string to a Destination URL's query component,
@@ -617,6 +670,7 @@ async fn insert_link(
         slug: slug.to_string(),
         destination_url: destination_url.to_string(),
         has_password: false,
+        password_version: 1,
         expires_at: None,
         created_at: now.to_string(),
         updated_at: now.to_string(),

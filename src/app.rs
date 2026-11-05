@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::extract::State;
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -8,6 +10,7 @@ use url::Url;
 
 use crate::db::Database;
 use crate::problems::ProblemDetails;
+use crate::unlock::PasswordAttemptLimiter;
 
 /// Deployment configuration needed by request handlers.
 #[derive(Debug, Clone)]
@@ -42,6 +45,7 @@ impl AppConfig {
 pub struct AppState {
     pub db: Database,
     pub config: AppConfig,
+    pub unlock_limiter: Arc<PasswordAttemptLimiter>,
 }
 
 /// Build the router with a test default base URL and proxy trust disabled.
@@ -57,7 +61,11 @@ pub fn build_router_with_config(db: Database, config: AppConfig) -> Router {
         .merge(crate::api::router())
         .merge(crate::redirect::router())
         .fallback(fallback)
-        .with_state(AppState { db, config })
+        .with_state(AppState {
+            db,
+            config,
+            unlock_limiter: Arc::new(PasswordAttemptLimiter::new()),
+        })
 }
 
 async fn fallback(uri: Uri) -> Response {

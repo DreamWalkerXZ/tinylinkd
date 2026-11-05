@@ -1,21 +1,28 @@
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 
+use axum::Form;
 use axum::Router;
 use axum::extract::connect_info::ConnectInfo;
+use axum::extract::rejection::FormRejection;
 use axum::extract::{FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use serde::Deserialize;
 use url::Url;
 
 use crate::app::AppState;
-use crate::links::{self, NewClick};
+use crate::auth;
+use crate::links::{self, Link, NewClick};
 use crate::pages;
+use crate::secrets;
+use crate::timeutil;
+use crate::unlock;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/{slug}", get(redirect).head(redirect_head))
+    Router::new().route("/{slug}", get(redirect).head(redirect_head).post(unlock))
 }
 
 async fn redirect(
@@ -55,13 +62,54 @@ async fn respond(
         }
     };
 
+    if link.has_password && !is_unlocked(&state, &link, &headers).await {
+        return pages::password_form(StatusCode::OK, &slug, None);
+    }
+
+    redirect_to_destination(&state, &link, query, &headers, client.0, record_click).await
+}
+
+/// Whether the request carries a valid unlock cookie for this Link's current
+/// password version.
+async fn is_unlocked(state: &AppState, link: &Link, headers: &HeaderMap) -> bool {
+    let Some(cookie) = unlock::cookie_from_headers(headers, link.id) else {
+        return false;
+    };
+    let secret = match secrets::unlock_cookie_signing_key(&state.db).await {
+        Ok(secret) => secret,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                link_id = link.id,
+                "failed to read the unlock signing key"
+            );
+            return false;
+        }
+    };
+    unlock::cookie_is_valid(
+        &secret,
+        &cookie,
+        link.id,
+        link.password_version,
+        timeutil::now(),
+    )
+}
+
+async fn redirect_to_destination(
+    state: &AppState,
+    link: &Link,
+    query: Option<&str>,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    record_click: bool,
+) -> Response {
     if record_click {
-        let user_agent = header_value(&headers, header::USER_AGENT).unwrap_or_default();
+        let user_agent = header_value(headers, header::USER_AGENT).unwrap_or_default();
         let (device, is_bot) = links::classify_user_agent(&user_agent);
         let click = NewClick {
-            ip: client_ip(client.0, &headers, state.config.trust_proxy),
+            ip: client_ip(peer, headers, state.config.trust_proxy),
             user_agent,
-            referer: header_value(&headers, header::REFERER),
+            referer: header_value(headers, header::REFERER),
             device,
             is_bot,
         };
@@ -86,6 +134,116 @@ async fn respond(
     let response_headers = response.headers_mut();
     response_headers.insert(header::LOCATION, location);
     response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+#[derive(Debug, Deserialize)]
+struct PasswordForm {
+    password: String,
+}
+
+/// Submit the public password form: a correct password sets the unlock cookie
+/// and redirects to the short URL; a wrong one returns the form with 401.
+async fn unlock(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    client: ClientIp,
+    form: Result<Form<PasswordForm>, FormRejection>,
+) -> Response {
+    let link = match links::find_by_slug(&state.db, &slug).await {
+        Ok(Some(link)) => link,
+        Ok(None) => return pages::not_found(&slug),
+        Err(error) => {
+            tracing::error!(error = %error, slug = %slug, "failed to look up Link for password");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    if !link.has_password {
+        let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
+        response
+            .headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
+        return response;
+    }
+
+    let ip = client_ip(client.0, &headers, state.config.trust_proxy);
+    if let Some(retry_after) = state.unlock_limiter.check(&ip, link.id) {
+        let mut response = pages::password_form(
+            StatusCode::TOO_MANY_REQUESTS,
+            &slug,
+            Some("Too many failed attempts. Try again later."),
+        );
+        response.headers_mut().insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_str(&retry_after.to_string())
+                .expect("a seconds value is a valid header value"),
+        );
+        return response;
+    }
+
+    let Ok(Form(form)) = form else {
+        state.unlock_limiter.record_failure(&ip, link.id);
+        return pages::password_form(
+            StatusCode::UNAUTHORIZED,
+            &slug,
+            Some("Enter the Link password."),
+        );
+    };
+
+    let password_hash = match links::find_password_hash(&state.db, link.id).await {
+        Ok(Some(password_hash)) => password_hash,
+        // The password was cleared between the lookup and verification.
+        Ok(None) => return redirect_to_short_url(&slug),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                link_id = link.id,
+                "failed to read the Link password"
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    if !auth::verify_password(&form.password, &password_hash) {
+        state.unlock_limiter.record_failure(&ip, link.id);
+        return pages::password_form(
+            StatusCode::UNAUTHORIZED,
+            &slug,
+            Some("Incorrect password. Please try again."),
+        );
+    }
+
+    let secret = match secrets::unlock_cookie_signing_key(&state.db).await {
+        Ok(secret) => secret,
+        Err(error) => {
+            tracing::error!(error = %error, link_id = link.id, "failed to read the unlock signing key");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let value = unlock::issue_cookie(&secret, link.id, link.password_version, timeutil::now());
+    let secure = state.config.base_url.scheme() == "https";
+    let set_cookie = unlock::set_cookie_header(link.id, &value, secure);
+
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&format!("/{slug}")).expect("a Slug is a valid Location"),
+    );
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&set_cookie).expect("the unlock cookie is a valid header value"),
+    );
+    response
+}
+
+fn redirect_to_short_url(slug: &str) -> Response {
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&format!("/{slug}")).expect("a Slug is a valid Location"),
+    );
     response
 }
 

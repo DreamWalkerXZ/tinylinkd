@@ -728,6 +728,15 @@ pub struct CreateLinkRequest {
     pub slug: Option<String>,
 }
 
+fn deserialize_optional_password<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateLinkRequest {
     /// The new absolute `http` or `https` URL the Link redirects to.
@@ -737,6 +746,11 @@ pub struct UpdateLinkRequest {
     pub slug: Option<String>,
     /// Admin-only: transfer the Link to another existing User.
     pub owner_id: Option<i64>,
+    /// A non-empty string sets or changes the Link's password; `null` clears
+    /// it and makes the Link redirect without a password. Omit the field to
+    /// leave the password unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_password")]
+    pub password: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -746,6 +760,7 @@ pub struct LinkResponse {
     pub slug: String,
     pub short_url: String,
     pub destination_url: String,
+    /// Whether the Link requires a password before it redirects.
     pub has_password: bool,
     pub expires_at: Option<String>,
     pub status: LinkStatus,
@@ -1014,6 +1029,7 @@ async fn update_link(
             destination_url: payload.destination_url,
             slug: payload.slug,
             owner_id: payload.owner_id,
+            password: payload.password,
         },
     )
     .await
