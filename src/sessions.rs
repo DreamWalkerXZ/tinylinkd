@@ -50,14 +50,27 @@ pub fn login_csrf_set_cookie(value: &str, secure: bool) -> String {
 }
 
 /// The `Set-Cookie` header that stores a browser session.
+///
+/// The `Expires` attribute mirrors the `Max-Age` idle timeout so browsers that
+/// ignore `Max-Age` expire the cookie at the same time. Every authenticated
+/// response re-issues this cookie, so the timeout slides with activity.
 pub fn session_set_cookie(value: &str, secure: bool) -> String {
+    let expires_at = http_cookie_expires(SESSION_IDLE_TTL_SECONDS);
     let mut cookie = format!(
-        "{SESSION_COOKIE_NAME}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_IDLE_TTL_SECONDS}"
+        "{SESSION_COOKIE_NAME}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_IDLE_TTL_SECONDS}; Expires={expires_at}"
     );
     if secure {
         cookie.push_str("; Secure");
     }
     cookie
+}
+
+/// An IMF-fixdate timestamp `seconds` from now, as used by cookie `Expires`.
+fn http_cookie_expires(seconds: i64) -> String {
+    use chrono::{DateTime, Utc};
+    let when = std::time::SystemTime::now() + std::time::Duration::from_secs(seconds.max(0) as u64);
+    let when: DateTime<Utc> = when.into();
+    when.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
 }
 
 /// The `Set-Cookie` header that removes the browser session cookie.
@@ -231,6 +244,39 @@ pub async fn authenticate(
     }
 
     Ok(Some((session, user)))
+}
+
+/// Whether a plaintext session token still authenticates, without sliding its
+/// idle expiry. Response middleware uses this to decide whether to re-issue
+/// the browser cookie; [`authenticate`] performs the sliding update itself.
+pub async fn is_valid(db: &Database, plaintext: &str) -> Result<bool, ApiError> {
+    let row = sqlx::query(
+        "SELECT s.expires_at, s.revoked_at, u.disabled_at
+         FROM sessions s JOIN users u ON u.id = s.user_id
+         WHERE s.token_hash = ?",
+    )
+    .bind(hash_token(plaintext))
+    .fetch_optional(db.read_pool())
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let revoked_at: Option<String> = row.try_get("revoked_at")?;
+    if revoked_at.is_some() {
+        return Ok(false);
+    }
+    let disabled_at: Option<String> = row.try_get("disabled_at")?;
+    if disabled_at.is_some() {
+        return Ok(false);
+    }
+    let expires_at: String = row.try_get("expires_at")?;
+    match timeutil::parse_rfc3339(&expires_at) {
+        Ok(expires_at) => Ok(expires_at > timeutil::now()),
+        Err(error) => {
+            tracing::error!(error = %error, "stored session expiry is not RFC 3339");
+            Ok(false)
+        }
+    }
 }
 
 /// Process-local failed-login limiter keyed by client IP. A single-instance

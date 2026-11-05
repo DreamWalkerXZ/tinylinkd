@@ -211,6 +211,18 @@ async fn session_csrf_token(context: &TestContext) -> String {
     .expect("active session CSRF token")
 }
 
+/// The CSRF token of one specific session cookie.
+async fn session_csrf_for(context: &TestContext, session_cookie: &str) -> String {
+    let plaintext = session_cookie
+        .strip_prefix("tld_session=")
+        .expect("session cookie pair");
+    sqlx::query_scalar("SELECT csrf_token FROM sessions WHERE token_hash = ?")
+        .bind(tinylinkd::auth::sha256_hex(plaintext.as_bytes()))
+        .fetch_one(context.db.read_pool())
+        .await
+        .expect("session CSRF token")
+}
+
 async fn create_link_on_db(
     context: &TestContext,
     owner: &User,
@@ -1187,6 +1199,75 @@ async fn logging_in_again_rotates_the_session_and_the_old_cookie_stops_working()
 }
 
 #[tokio::test]
+async fn an_authenticated_request_refreshes_the_session_cookie() {
+    let context = TestContext::new().await;
+    create_user(&context, "alice", Role::User).await;
+    let (session, login) = login(&context, "alice", PASSWORD).await;
+    let initial = set_cookie(&login, "tld_session").expect("session cookie");
+    assert!(initial.contains("Max-Age=604800"), "cookie: {initial}");
+
+    let response = get_with_cookies(&context, "/_/links", std::slice::from_ref(&session)).await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let refreshed = set_cookie(&response, "tld_session").expect("a refreshed session cookie");
+    assert!(
+        refreshed.starts_with(&format!("{session};")),
+        "the cookie must keep the same session token: {refreshed}"
+    );
+    assert!(
+        refreshed.contains("Max-Age=604800"),
+        "the idle timeout must slide: {refreshed}"
+    );
+    assert!(
+        refreshed.contains("Expires=") && refreshed.contains("GMT"),
+        "the cookie must carry an expiry: {refreshed}"
+    );
+    assert!(refreshed.contains("HttpOnly"), "cookie: {refreshed}");
+    assert!(refreshed.contains("SameSite=Lax"), "cookie: {refreshed}");
+    assert!(refreshed.contains("Path=/"), "cookie: {refreshed}");
+    assert!(
+        !refreshed.contains("Secure"),
+        "a plain-HTTP base URL must not set Secure: {refreshed}"
+    );
+}
+
+#[tokio::test]
+async fn an_unauthenticated_request_does_not_refresh_a_session_cookie() {
+    let context = TestContext::new().await;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        HeaderValue::from_static("tld_session=not-a-real-session"),
+    );
+    let response = context.get_with_headers("/_/links", headers).await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER);
+    assert!(
+        set_cookie(&response, "tld_session").is_none(),
+        "an invalid session must not be refreshed: {:?}",
+        set_cookies(&response)
+    );
+}
+
+#[tokio::test]
+async fn the_refreshed_session_cookie_is_secure_over_https() {
+    let context = TestContext::with_config("https://tinylinkd.example", false).await;
+    create_user(&context, "alice", Role::User).await;
+    let (session, login) = login(&context, "alice", PASSWORD).await;
+    let initial = set_cookie(&login, "tld_session").expect("session cookie");
+    assert!(initial.contains("Secure"), "cookie: {initial}");
+
+    let response = get_with_cookies(&context, "/_/links", std::slice::from_ref(&session)).await;
+    assert_eq!(response.status, StatusCode::OK);
+    let refreshed = set_cookie(&response, "tld_session").expect("a refreshed session cookie");
+    assert!(refreshed.contains("Secure"), "cookie: {refreshed}");
+}
+
+#[tokio::test]
 async fn an_expired_session_redirects_to_login() {
     let context = TestContext::new().await;
     let alice = create_user(&context, "alice", Role::User).await;
@@ -1218,4 +1299,904 @@ async fn an_expired_session_redirects_to_login() {
             .and_then(|value| value.to_str().ok()),
         Some("/_/login")
     );
+}
+
+#[tokio::test]
+async fn the_users_page_lists_roles_disabled_status_and_timestamps() {
+    let context = TestContext::new().await;
+    let alice = create_user(&context, "alice", Role::User).await;
+    let root = create_user(&context, "root", Role::Admin).await;
+    sqlx::query("UPDATE users SET disabled_at = '2026-01-02T03:04:05Z' WHERE id = ?")
+        .bind(alice.id)
+        .execute(context.db.write_pool())
+        .await
+        .expect("disable alice");
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+
+    let response = get_with_cookies(&context, "/_/users", &[admin_session]).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    assert_eq!(response.content_type(), "text/html; charset=utf-8");
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(body.contains("alice"), "body: {body}");
+    assert!(body.contains("root"), "body: {body}");
+    assert!(body.contains(">user<"), "role is shown: {body}");
+    assert!(body.contains(">admin<"), "role is shown: {body}");
+    assert!(body.contains("disabled"), "boundary status: {body}");
+    assert!(
+        body.contains("2026-01-02T03:04:05Z"),
+        "disabled timestamp: {body}"
+    );
+    assert!(
+        body.contains(&alice.created_at),
+        "created timestamp: {body}"
+    );
+    assert!(body.contains(&root.created_at), "created timestamp: {body}");
+    assert!(body.contains("name=\"csrf_token\""), "CSRF field: {body}");
+}
+
+#[tokio::test]
+async fn an_admin_disables_and_enables_a_user() {
+    let context = TestContext::new().await;
+    let alice = create_user(&context, "alice", Role::User).await;
+    create_user(&context, "root", Role::Admin).await;
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let csrf_token = session_csrf_for(&context, &admin_session).await;
+
+    let disabled = post_form(
+        &context,
+        &format!("/_/users/{}/disable", alice.id),
+        std::slice::from_ref(&admin_session),
+        &[("csrf_token", &csrf_token)],
+    )
+    .await;
+    assert_eq!(disabled.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        disabled
+            .headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/_/users")
+    );
+    let stored = users::find_by_id(&context.db, alice.id)
+        .await
+        .expect("read alice")
+        .expect("alice exists");
+    assert!(stored.disabled_at.is_some(), "alice must be disabled");
+
+    let (session_cookie, login_response) = login(&context, "alice", PASSWORD).await;
+    assert_eq!(login_response.status, StatusCode::UNAUTHORIZED);
+    assert!(session_cookie.is_empty());
+
+    let page = get_with_cookies(&context, "/_/users", std::slice::from_ref(&admin_session)).await;
+    assert!(String::from_utf8_lossy(&page.body).contains("disabled"));
+
+    let enabled = post_form(
+        &context,
+        &format!("/_/users/{}/enable", alice.id),
+        std::slice::from_ref(&admin_session),
+        &[("csrf_token", &csrf_token)],
+    )
+    .await;
+    assert_eq!(enabled.status, StatusCode::SEE_OTHER);
+    let stored = users::find_by_id(&context.db, alice.id)
+        .await
+        .expect("read alice")
+        .expect("alice exists");
+    assert!(stored.disabled_at.is_none(), "alice must be enabled");
+
+    let (_, login_response) = login(&context, "alice", PASSWORD).await;
+    assert_eq!(login_response.status, StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn an_admin_deletes_only_users_who_own_no_links() {
+    let context = TestContext::new().await;
+    let alice = create_user(&context, "alice", Role::User).await;
+    let bob = create_user(&context, "bob", Role::User).await;
+    create_user(&context, "root", Role::Admin).await;
+    create_link_on_db(&context, &alice, "owned-link", "https://example.com/owned").await;
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let csrf_token = session_csrf_for(&context, &admin_session).await;
+
+    let blocked = post_form(
+        &context,
+        &format!("/_/users/{}/delete", alice.id),
+        std::slice::from_ref(&admin_session),
+        &[("csrf_token", &csrf_token), ("confirm", "1")],
+    )
+    .await;
+    assert_eq!(
+        blocked.status,
+        StatusCode::CONFLICT,
+        "body: {}",
+        String::from_utf8_lossy(&blocked.body)
+    );
+    let body = String::from_utf8_lossy(&blocked.body);
+    assert!(body.contains("owns 1 Link"), "body: {body}");
+    assert!(
+        body.contains("Delete or transfer them first"),
+        "body: {body}"
+    );
+    assert!(
+        users::find_by_id(&context.db, alice.id)
+            .await
+            .expect("read alice")
+            .is_some(),
+        "a User who owns Links must not be deleted"
+    );
+
+    let deleted = post_form(
+        &context,
+        &format!("/_/users/{}/delete", bob.id),
+        &[admin_session],
+        &[("csrf_token", &csrf_token), ("confirm", "1")],
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::SEE_OTHER);
+    assert!(
+        users::find_by_id(&context.db, bob.id)
+            .await
+            .expect("read bob")
+            .is_none(),
+        "a link-less User must be deleted"
+    );
+}
+
+#[tokio::test]
+async fn user_admin_forms_reject_a_missing_or_wrong_csrf_token() {
+    let context = TestContext::new().await;
+    let alice = create_user(&context, "alice", Role::User).await;
+    create_user(&context, "root", Role::Admin).await;
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+
+    let missing = post_form(
+        &context,
+        &format!("/_/users/{}/disable", alice.id),
+        std::slice::from_ref(&admin_session),
+        &[],
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::FORBIDDEN);
+
+    let wrong = post_form(
+        &context,
+        &format!("/_/users/{}/delete", alice.id),
+        &[admin_session],
+        &[("csrf_token", "not-the-token"), ("confirm", "1")],
+    )
+    .await;
+    assert_eq!(wrong.status, StatusCode::FORBIDDEN);
+
+    let stored = users::find_by_id(&context.db, alice.id)
+        .await
+        .expect("read alice")
+        .expect("alice exists");
+    assert!(stored.disabled_at.is_none());
+}
+
+#[tokio::test]
+async fn admin_pages_are_forbidden_to_non_admins() {
+    let context = TestContext::new().await;
+    let alice = create_user(&context, "alice", Role::User).await;
+    create_user(&context, "root", Role::Admin).await;
+
+    for uri in ["/_/users", "/_/invites", "/_/settings"] {
+        let anonymous = context.get(uri, None).await;
+        assert_eq!(anonymous.status, StatusCode::SEE_OTHER, "uri: {uri}");
+        assert_eq!(
+            anonymous
+                .headers
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/_/login"),
+            "uri: {uri}"
+        );
+
+        let (alice_session, _) = login(&context, "alice", PASSWORD).await;
+        let forbidden = get_with_cookies(&context, uri, std::slice::from_ref(&alice_session)).await;
+        assert_eq!(
+            forbidden.status,
+            StatusCode::FORBIDDEN,
+            "uri: {uri}, body: {}",
+            String::from_utf8_lossy(&forbidden.body)
+        );
+
+        let (root_session, _) = login(&context, "root", PASSWORD).await;
+        let allowed = get_with_cookies(&context, uri, &[root_session]).await;
+        assert_eq!(
+            allowed.status,
+            StatusCode::OK,
+            "uri: {uri}, body: {}",
+            String::from_utf8_lossy(&allowed.body)
+        );
+    }
+
+    let (alice_session, _) = login(&context, "alice", PASSWORD).await;
+    let alice_csrf = session_csrf_for(&context, &alice_session).await;
+    let denied = post_form(
+        &context,
+        &format!("/_/users/{}/disable", alice.id),
+        &[alice_session],
+        &[("csrf_token", &alice_csrf)],
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let stored = users::find_by_id(&context.db, alice.id)
+        .await
+        .expect("read alice")
+        .expect("alice exists");
+    assert!(stored.disabled_at.is_none());
+}
+
+#[tokio::test]
+async fn the_navigation_exposes_admin_pages_only_to_admins() {
+    let context = TestContext::new().await;
+    create_user(&context, "alice", Role::User).await;
+    create_user(&context, "root", Role::Admin).await;
+
+    let (alice_session, _) = login(&context, "alice", PASSWORD).await;
+    let alice_page = get_with_cookies(&context, "/_/links", &[alice_session]).await;
+    assert_eq!(alice_page.status, StatusCode::OK);
+    let alice_body = String::from_utf8_lossy(&alice_page.body);
+    for link in ["/_/users", "/_/invites", "/_/settings"] {
+        assert!(
+            !alice_body.contains(link),
+            "a User must not see the {link} navigation entry: {alice_body}"
+        );
+    }
+
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let admin_page = get_with_cookies(&context, "/_/links", &[admin_session]).await;
+    assert_eq!(admin_page.status, StatusCode::OK);
+    let admin_body = String::from_utf8_lossy(&admin_page.body);
+    for link in ["/_/users", "/_/invites", "/_/settings"] {
+        assert!(
+            admin_body.contains(link),
+            "an Admin must see the {link} navigation entry: {admin_body}"
+        );
+    }
+}
+
+/// The first `<code>...</code>` value rendered by a template.
+fn first_code(body: &[u8]) -> String {
+    let html = String::from_utf8_lossy(body);
+    let start = html.find("<code>").expect("a code element") + "<code>".len();
+    let end = html[start..]
+        .find("</code>")
+        .expect("a closed code element")
+        + start;
+    html[start..end].to_string()
+}
+
+#[tokio::test]
+async fn an_admin_creates_an_invite_and_sees_the_token_once() {
+    let context = TestContext::new().await;
+    create_user(&context, "root", Role::Admin).await;
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let csrf_token = session_csrf_for(&context, &admin_session).await;
+
+    let response = post_form(
+        &context,
+        "/_/invites",
+        std::slice::from_ref(&admin_session),
+        &[("csrf_token", &csrf_token)],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(body.contains("shown only once"), "body: {body}");
+    let token = first_code(&response.body);
+    assert_eq!(token.len(), 43, "32 random bytes as base64url: {token}");
+    assert!(
+        token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+        "the token is base64url: {token}"
+    );
+    assert_eq!(
+        body.matches(&token).count(),
+        1,
+        "the token must be shown exactly once: {body}"
+    );
+
+    let (stored_hash, expires_at): (String, String) =
+        sqlx::query_as("SELECT token_hash, expires_at FROM invites")
+            .fetch_one(context.db.read_pool())
+            .await
+            .expect("the stored Invite");
+    assert_eq!(stored_hash, tinylinkd::auth::sha256_hex(token.as_bytes()));
+    assert_ne!(stored_hash, token, "only the token hash is stored");
+    assert!(body.contains(&expires_at), "expiry shown: {body}");
+
+    let list = get_with_cookies(&context, "/_/invites", &[admin_session]).await;
+    assert_eq!(list.status, StatusCode::OK);
+    let list_body = String::from_utf8_lossy(&list.body);
+    assert!(
+        !list_body.contains(&token),
+        "the list must never show the plaintext token: {list_body}"
+    );
+    assert!(list_body.contains(">pending<"), "body: {list_body}");
+}
+
+#[tokio::test]
+async fn the_invites_page_lists_every_status_without_tokens() {
+    let context = TestContext::new().await;
+    let root = create_user(&context, "root", Role::Admin).await;
+
+    let pending = tinylinkd::invites::create_invite(&context.db, root.id)
+        .await
+        .expect("pending Invite");
+    let revoked = tinylinkd::invites::create_invite(&context.db, root.id)
+        .await
+        .expect("revokable Invite");
+    tinylinkd::invites::revoke_invite(&context.db, revoked.id)
+        .await
+        .expect("revoke the Invite");
+    let used = tinylinkd::invites::create_invite(&context.db, root.id)
+        .await
+        .expect("usable Invite");
+    tinylinkd::invites::accept_invite(
+        &context.db,
+        &used.plaintext,
+        tinylinkd::invites::AcceptInvite {
+            username: "invitee".into(),
+            email: None,
+            password: PASSWORD.into(),
+        },
+    )
+    .await
+    .expect("accept the Invite");
+    let expired = tinylinkd::invites::create_invite(&context.db, root.id)
+        .await
+        .expect("expiring Invite");
+    sqlx::query("UPDATE invites SET expires_at = '2020-01-01T00:00:00Z' WHERE id = ?")
+        .bind(expired.id)
+        .execute(context.db.write_pool())
+        .await
+        .expect("expire the Invite");
+
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let response = get_with_cookies(&context, "/_/invites", &[admin_session]).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let body = String::from_utf8_lossy(&response.body);
+    for status in ["pending", "revoked", "used", "expired"] {
+        assert!(
+            body.contains(&format!(">{status}<")),
+            "the {status} status is shown: {body}"
+        );
+    }
+    assert!(body.contains("root"), "the creating Admin: {body}");
+    assert!(body.contains(&pending.expires_at), "expiry: {body}");
+    for secret in [&pending.plaintext, &revoked.plaintext, &used.plaintext] {
+        assert!(
+            !body.contains(secret),
+            "the Invite list must never contain a plaintext token: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_admin_revokes_an_unused_invite() {
+    let context = TestContext::new().await;
+    let root = create_user(&context, "root", Role::Admin).await;
+    let revokable = tinylinkd::invites::create_invite(&context.db, root.id)
+        .await
+        .expect("create an Invite");
+    let used = tinylinkd::invites::create_invite(&context.db, root.id)
+        .await
+        .expect("create a used Invite");
+    tinylinkd::invites::accept_invite(
+        &context.db,
+        &used.plaintext,
+        tinylinkd::invites::AcceptInvite {
+            username: "invitee".into(),
+            email: None,
+            password: PASSWORD.into(),
+        },
+    )
+    .await
+    .expect("accept the Invite");
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let csrf_token = session_csrf_for(&context, &admin_session).await;
+
+    let revoked = post_form(
+        &context,
+        &format!("/_/invites/{}/revoke", revokable.id),
+        std::slice::from_ref(&admin_session),
+        &[("csrf_token", &csrf_token)],
+    )
+    .await;
+    assert_eq!(revoked.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        revoked
+            .headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/_/invites")
+    );
+    let revoked_at: Option<String> =
+        sqlx::query_scalar("SELECT revoked_at FROM invites WHERE id = ?")
+            .bind(revokable.id)
+            .fetch_one(context.db.read_pool())
+            .await
+            .expect("read the Invite");
+    assert!(revoked_at.is_some(), "the Invite must be revoked");
+
+    let blocked = post_form(
+        &context,
+        &format!("/_/invites/{}/revoke", used.id),
+        std::slice::from_ref(&admin_session),
+        &[("csrf_token", &csrf_token)],
+    )
+    .await;
+    assert_eq!(blocked.status, StatusCode::CONFLICT);
+    assert!(
+        String::from_utf8_lossy(&blocked.body).contains("already been used"),
+        "body: {}",
+        String::from_utf8_lossy(&blocked.body)
+    );
+
+    let missing = post_form(
+        &context,
+        "/_/invites/99999/revoke",
+        &[admin_session],
+        &[("csrf_token", &csrf_token)],
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn invite_forms_reject_a_missing_or_wrong_csrf_token() {
+    let context = TestContext::new().await;
+    let root = create_user(&context, "root", Role::Admin).await;
+    let invite = tinylinkd::invites::create_invite(&context.db, root.id)
+        .await
+        .expect("create an Invite");
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+
+    let missing = post_form(
+        &context,
+        "/_/invites",
+        std::slice::from_ref(&admin_session),
+        &[],
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::FORBIDDEN);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invites")
+        .fetch_one(context.db.read_pool())
+        .await
+        .expect("count Invites");
+    assert_eq!(count, 1, "a rejected form must not create an Invite");
+
+    let wrong = post_form(
+        &context,
+        &format!("/_/invites/{}/revoke", invite.id),
+        &[admin_session],
+        &[("csrf_token", "not-the-token")],
+    )
+    .await;
+    assert_eq!(wrong.status, StatusCode::FORBIDDEN);
+    let revoked_at: Option<String> =
+        sqlx::query_scalar("SELECT revoked_at FROM invites WHERE id = ?")
+            .bind(invite.id)
+            .fetch_one(context.db.read_pool())
+            .await
+            .expect("read the Invite");
+    assert!(revoked_at.is_none(), "a rejected form must not revoke");
+}
+
+#[tokio::test]
+async fn the_settings_page_prefills_the_instance_settings() {
+    let context = TestContext::new().await;
+    create_user(&context, "root", Role::Admin).await;
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let csrf_token = session_csrf_for(&context, &admin_session).await;
+
+    let response = get_with_cookies(&context, "/_/settings", &[admin_session]).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    assert_eq!(response.content_type(), "text/html; charset=utf-8");
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(body.contains("action=\"/_/settings\""), "body: {body}");
+    assert!(body.contains("value=\"tinylinkd\""), "body: {body}");
+    assert!(body.contains("value=\"UTC\""), "body: {body}");
+    assert!(body.contains("value=\"90\""), "body: {body}");
+    assert!(body.contains("value=\"3600\""), "body: {body}");
+    assert!(
+        body.contains(&format!("value=\"{csrf_token}\"")),
+        "body: {body}"
+    );
+    assert!(body.contains("name=\"instance_name\""), "body: {body}");
+    assert!(body.contains("name=\"timezone\""), "body: {body}");
+    assert!(
+        body.contains("name=\"click_retention_days\""),
+        "body: {body}"
+    );
+    assert!(
+        body.contains("name=\"password_unlock_ttl_seconds\""),
+        "body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn an_admin_updates_the_instance_settings() {
+    let context = TestContext::new().await;
+    create_user(&context, "root", Role::Admin).await;
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let csrf_token = session_csrf_for(&context, &admin_session).await;
+
+    let response = post_form(
+        &context,
+        "/_/settings",
+        std::slice::from_ref(&admin_session),
+        &[
+            ("csrf_token", &csrf_token),
+            ("instance_name", "My Links"),
+            ("timezone", "Europe/London"),
+            ("click_retention_days", "30"),
+            ("password_unlock_ttl_seconds", "120"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::SEE_OTHER,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    assert_eq!(
+        response
+            .headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/_/settings")
+    );
+    let stored = tinylinkd::settings::load(&context.db)
+        .await
+        .expect("load settings");
+    assert_eq!(stored.instance_name, "My Links");
+    assert_eq!(stored.timezone, "Europe/London");
+    assert_eq!(stored.click_retention_days, 30);
+    assert_eq!(stored.password_unlock_ttl_seconds, 120);
+
+    let list = get_with_cookies(&context, "/_/links", &[admin_session]).await;
+    assert!(
+        String::from_utf8_lossy(&list.body).contains("My Links"),
+        "the Instance name is used by the navigation"
+    );
+}
+
+#[tokio::test]
+async fn settings_validation_errors_render_inline_and_preserve_values() {
+    let context = TestContext::new().await;
+    create_user(&context, "root", Role::Admin).await;
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let csrf_token = session_csrf_for(&context, &admin_session).await;
+
+    let invalid_timezone = [
+        ("csrf_token", csrf_token.as_str()),
+        ("instance_name", "Renamed"),
+        ("timezone", "Not/AZone"),
+        ("click_retention_days", "90"),
+        ("password_unlock_ttl_seconds", "3600"),
+    ];
+    let response = post_form(
+        &context,
+        "/_/settings",
+        std::slice::from_ref(&admin_session),
+        &invalid_timezone,
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(body.contains("valid IANA timezone name"), "body: {body}");
+    assert!(body.contains("value=\"Not/AZone\""), "body: {body}");
+    assert!(body.contains("value=\"Renamed\""), "body: {body}");
+    let unchanged = tinylinkd::settings::load(&context.db)
+        .await
+        .expect("load settings");
+    assert_eq!(unchanged.instance_name, "tinylinkd");
+    assert_eq!(unchanged.timezone, "UTC");
+
+    let invalid_days = [
+        ("csrf_token", csrf_token.as_str()),
+        ("instance_name", "tinylinkd"),
+        ("timezone", "UTC"),
+        ("click_retention_days", "abc"),
+        ("password_unlock_ttl_seconds", "3600"),
+    ];
+    let response = post_form(
+        &context,
+        "/_/settings",
+        std::slice::from_ref(&admin_session),
+        &invalid_days,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(body.contains("whole number"), "body: {body}");
+    assert!(body.contains("value=\"abc\""), "body: {body}");
+
+    let zero_days = [
+        ("csrf_token", csrf_token.as_str()),
+        ("instance_name", "tinylinkd"),
+        ("timezone", "UTC"),
+        ("click_retention_days", "0"),
+        ("password_unlock_ttl_seconds", "3600"),
+    ];
+    let response = post_form(
+        &context,
+        "/_/settings",
+        std::slice::from_ref(&admin_session),
+        &zero_days,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        String::from_utf8_lossy(&response.body).contains("positive number of days"),
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+
+    let bad_ttl = [
+        ("csrf_token", csrf_token.as_str()),
+        ("instance_name", "tinylinkd"),
+        ("timezone", "UTC"),
+        ("click_retention_days", "90"),
+        ("password_unlock_ttl_seconds", "-1"),
+    ];
+    let response = post_form(
+        &context,
+        "/_/settings",
+        std::slice::from_ref(&admin_session),
+        &bad_ttl,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        String::from_utf8_lossy(&response.body).contains("positive number of seconds"),
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+
+    let empty_name = [
+        ("csrf_token", csrf_token.as_str()),
+        ("instance_name", ""),
+        ("timezone", "UTC"),
+        ("click_retention_days", "90"),
+        ("password_unlock_ttl_seconds", "3600"),
+    ];
+    let response = post_form(&context, "/_/settings", &[admin_session], &empty_name).await;
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        String::from_utf8_lossy(&response.body).contains("must not be empty"),
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+}
+
+#[tokio::test]
+async fn settings_forms_reject_a_missing_or_wrong_csrf_token() {
+    let context = TestContext::new().await;
+    create_user(&context, "root", Role::Admin).await;
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+
+    let fields = [
+        ("instance_name", "Hijacked"),
+        ("timezone", "UTC"),
+        ("click_retention_days", "1"),
+        ("password_unlock_ttl_seconds", "1"),
+    ];
+    let missing = post_form(
+        &context,
+        "/_/settings",
+        std::slice::from_ref(&admin_session),
+        &fields,
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::FORBIDDEN);
+
+    let mut wrong_fields = vec![("csrf_token", "not-the-token")];
+    wrong_fields.extend_from_slice(&fields);
+    let wrong = post_form(&context, "/_/settings", &[admin_session], &wrong_fields).await;
+    assert_eq!(wrong.status, StatusCode::FORBIDDEN);
+
+    let unchanged = tinylinkd::settings::load(&context.db)
+        .await
+        .expect("load settings");
+    assert_eq!(unchanged.instance_name, "tinylinkd");
+    assert_eq!(unchanged.click_retention_days, 90);
+}
+
+#[tokio::test]
+async fn an_admin_transfers_a_link_and_access_follows_the_new_owner() {
+    let context = TestContext::new().await;
+    let alice = create_user(&context, "alice", Role::User).await;
+    let bob = create_user(&context, "bob", Role::User).await;
+    let _admin = create_user(&context, "root", Role::Admin).await;
+    let link = create_link_on_db(
+        &context,
+        &alice,
+        "shared-link",
+        "https://example.com/target",
+    )
+    .await;
+    let (admin_session, _) = login(&context, "root", PASSWORD).await;
+    let csrf_token = session_csrf_for(&context, &admin_session).await;
+
+    let edit = get_with_cookies(
+        &context,
+        &format!("/_/links/{}/edit", link.id),
+        std::slice::from_ref(&admin_session),
+    )
+    .await;
+    assert_eq!(
+        edit.status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&edit.body)
+    );
+    let body = String::from_utf8_lossy(&edit.body);
+    assert!(body.contains("name=\"owner_id\""), "body: {body}");
+    assert!(
+        body.contains(&format!("value=\"{}\" selected", alice.id)),
+        "the current owner is selected: {body}"
+    );
+    assert!(
+        body.contains(&format!("value=\"{}\"", bob.id)),
+        "the other User is offered as an owner: {body}"
+    );
+
+    let response = post_form(
+        &context,
+        &format!("/_/links/{}", link.id),
+        std::slice::from_ref(&admin_session),
+        &[
+            ("csrf_token", &csrf_token),
+            ("destination_url", "https://example.com/target"),
+            ("slug", "shared-link"),
+            ("owner_id", &bob.id.to_string()),
+        ],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let transferred = tinylinkd::links::find_by_id(&context.db, link.id)
+        .await
+        .expect("read Link")
+        .expect("Link exists");
+    assert_eq!(transferred.owner_id, bob.id);
+
+    let (bob_session, _) = login(&context, "bob", PASSWORD).await;
+    let bob_list = get_with_cookies(&context, "/_/links", std::slice::from_ref(&bob_session)).await;
+    assert_eq!(bob_list.status, StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&bob_list.body).contains("shared-link"),
+        "the new owner sees the Link in their list"
+    );
+    let bob_detail = get_with_cookies(
+        &context,
+        &format!("/_/links/{}", link.id),
+        std::slice::from_ref(&bob_session),
+    )
+    .await;
+    assert_eq!(bob_detail.status, StatusCode::OK);
+    let bob_edit = get_with_cookies(
+        &context,
+        &format!("/_/links/{}/edit", link.id),
+        std::slice::from_ref(&bob_session),
+    )
+    .await;
+    assert_eq!(bob_edit.status, StatusCode::OK);
+    let bob_edit_body = String::from_utf8_lossy(&bob_edit.body);
+    assert!(
+        !bob_edit_body.contains("name=\"owner_id\""),
+        "a non-Admin does not get the owner selector: {bob_edit_body}"
+    );
+
+    let (alice_session, _) = login(&context, "alice", PASSWORD).await;
+    let alice_list =
+        get_with_cookies(&context, "/_/links", std::slice::from_ref(&alice_session)).await;
+    assert!(
+        !String::from_utf8_lossy(&alice_list.body).contains("shared-link"),
+        "the old owner loses the Link in their list"
+    );
+    let alice_detail = get_with_cookies(
+        &context,
+        &format!("/_/links/{}", link.id),
+        std::slice::from_ref(&alice_session),
+    )
+    .await;
+    assert_eq!(
+        alice_detail.status,
+        StatusCode::FORBIDDEN,
+        "the old owner loses access to the Link"
+    );
+    let alice_edit = get_with_cookies(
+        &context,
+        &format!("/_/links/{}/edit", link.id),
+        &[alice_session],
+    )
+    .await;
+    assert_eq!(alice_edit.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_non_admin_cannot_transfer_link_ownership() {
+    let context = TestContext::new().await;
+    let alice = create_user(&context, "alice", Role::User).await;
+    let bob = create_user(&context, "bob", Role::User).await;
+    let link = create_link_on_db(&context, &alice, "alice-link", "https://example.com/alice").await;
+    let (session, _) = login(&context, "alice", PASSWORD).await;
+    let csrf_token = session_csrf_for(&context, &session).await;
+
+    let edit = get_with_cookies(
+        &context,
+        &format!("/_/links/{}/edit", link.id),
+        std::slice::from_ref(&session),
+    )
+    .await;
+    assert_eq!(edit.status, StatusCode::OK);
+    assert!(
+        !String::from_utf8_lossy(&edit.body).contains("name=\"owner_id\""),
+        "a non-Admin is not offered the owner selector"
+    );
+
+    let response = post_form(
+        &context,
+        &format!("/_/links/{}", link.id),
+        std::slice::from_ref(&session),
+        &[
+            ("csrf_token", &csrf_token),
+            ("destination_url", "https://example.com/alice"),
+            ("slug", "alice-link"),
+            ("owner_id", &bob.id.to_string()),
+        ],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::FORBIDDEN,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let unchanged = tinylinkd::links::find_by_id(&context.db, link.id)
+        .await
+        .expect("read Link")
+        .expect("Link exists");
+    assert_eq!(unchanged.owner_id, alice.id);
 }
