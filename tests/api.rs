@@ -525,7 +525,14 @@ async fn unknown_api_routes_return_problem_details() {
     assert_eq!(problem["code"], "not_found");
     assert_eq!(problem["instance"], "/_/api/v1/unknown");
 
+    // In the admin UI phase the root path redirects to the login page for an
+    // unauthenticated browser instead of returning the API-first 404.
     let root = context.get("/", None).await;
-    assert_eq!(root.status, StatusCode::NOT_FOUND);
-    assert_eq!(root.content_type(), "");
+    assert_eq!(root.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        root.headers
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/_/login")
+    );
 }

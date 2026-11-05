@@ -1,3 +1,4 @@
+pub mod admin_ui;
 pub mod analytics;
 pub mod api;
 pub mod app;
@@ -14,6 +15,7 @@ pub mod password_resets;
 pub mod problems;
 pub mod redirect;
 pub mod secrets;
+pub mod sessions;
 pub mod settings;
 pub mod timeutil;
 pub mod tokens;

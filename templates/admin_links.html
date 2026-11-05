@@ -1,0 +1,81 @@
+{% extends "admin_base.html" %}
+{% block title %}Links - {{ nav.instance_name }}{% endblock %}
+{% block content %}
+<h1>Links</h1>
+
+<form method="get" action="/_/links" class="filters">
+  <div>
+    <label for="q">Search</label>
+    <input id="q" name="q" type="text" value="{{ q }}">
+  </div>
+  <div>
+    <label for="status">Status</label>
+    <select id="status" name="status">
+      <option value=""{% if status_filter.is_empty() %} selected{% endif %}>All</option>
+      <option value="active"{% if status_filter == "active" %} selected{% endif %}>Active</option>
+      <option value="expired"{% if status_filter == "expired" %} selected{% endif %}>Expired</option>
+    </select>
+  </div>
+  {% if is_admin %}
+  <div>
+    <label for="owner_id">Owner</label>
+    <select id="owner_id" name="owner_id">
+      <option value="">All Users</option>
+      {% for owner in owners %}
+      <option value="{{ owner.id }}"{% if owner.selected %} selected{% endif %}>{{ owner.username }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  {% endif %}
+  <button type="submit">Filter</button>
+  <a href="/_/links/new">Create a Link</a>
+</form>
+
+<p class="muted">{{ total }} Link{% if total != 1 %}s{% endif %}</p>
+
+{% if links.is_empty() %}
+<p>No Links yet. <a href="/_/links/new">Create the first one</a>.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Status</th>
+      <th>Short URL</th>
+      <th>Destination</th>
+      {% if is_admin %}<th>Owner</th>{% endif %}
+      <th>Password</th>
+      <th>Expiry</th>
+      <th>Clicks</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for link in links %}
+    <tr>
+      <td><span class="badge">{{ link.status }}</span></td>
+      <td><a href="{{ link.short_url }}">{{ link.short_url }}</a></td>
+      <td class="destination">{{ link.destination_url }}</td>
+      {% if is_admin %}<td>{{ link.owner }}</td>{% endif %}
+      <td>{% if link.has_password %}protected{% else %}-{% endif %}</td>
+      <td>{% match link.expires_at %}{% when Some with (expiry) %}{{ expiry }}{% when None %}-{% endmatch %}</td>
+      <td>{{ link.total_clicks }} ({{ link.human_clicks }} human, {{ link.bot_clicks }} bot)</td>
+      <td class="actions">
+        <a href="/_/links/{{ link.id }}">Details</a>
+        <a href="/_/links/{{ link.id }}/edit">Edit</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+{% if has_previous || has_next %}
+<p class="actions">
+  {% if has_previous %}<a href="/_/links?page={{ page - 1 }}">Previous</a>{% endif %}
+  <span class="muted">Page {{ page }}</span>
+  {% if has_next %}<a href="/_/links?page={{ page + 1 }}">Next</a>{% endif %}
+</p>
+{% endif %}
+{% endblock %}

@@ -111,19 +111,84 @@ pub fn random_slug() -> Result<String, ApiError> {
         .collect())
 }
 
+/// All fields needed to create a Link. The JSON API only sends the Destination
+/// URL and Slug; the browser UI also sets an optional password and expiry.
+#[derive(Debug, Clone)]
+pub struct NewLink<'a> {
+    pub owner_id: i64,
+    pub destination_url: &'a str,
+    pub slug: Option<&'a str>,
+    pub password: Option<&'a str>,
+    pub expires_at: Option<&'a str>,
+}
+
+impl<'a> NewLink<'a> {
+    pub fn new(owner_id: i64, destination_url: &'a str, slug: Option<&'a str>) -> Self {
+        Self {
+            owner_id,
+            destination_url,
+            slug,
+            password: None,
+            expires_at: None,
+        }
+    }
+}
+
 pub async fn create_link(
     db: &Database,
     owner_id: i64,
     destination_url: &str,
     slug: Option<&str>,
 ) -> Result<Link, ApiError> {
-    let destination_url = validate_destination_url(destination_url)?;
-    match slug {
-        Some(slug) => {
-            validate_slug(slug)?;
-            create_with_slug(db, owner_id, &destination_url, slug).await
+    create_link_with(db, NewLink::new(owner_id, destination_url, slug)).await
+}
+
+/// Create a Link with an optional password and expiry. Validation and Argon2id
+/// hashing happen before the write transaction so the single SQLite writer is
+/// not held during password hashing.
+pub async fn create_link_with(db: &Database, new: NewLink<'_>) -> Result<Link, ApiError> {
+    let destination_url = validate_destination_url(new.destination_url)?;
+    if let Some(slug) = new.slug {
+        validate_slug(slug)?;
+    }
+    let password_hash = match new.password.filter(|password| !password.is_empty()) {
+        Some(password) => {
+            crate::users::validate_password(password)?;
+            Some(crate::auth::hash_password(password).map_err(|error| {
+                ApiError::internal(format!("failed to hash the Link password: {error}"))
+            })?)
         }
-        None => create_with_generated_slug(db, owner_id, &destination_url, random_slug).await,
+        None => None,
+    };
+    let expires_at = new
+        .expires_at
+        .filter(|expires_at| !expires_at.trim().is_empty())
+        .map(normalize_expiry)
+        .transpose()?;
+
+    match new.slug {
+        Some(slug) => {
+            create_with_slug(
+                db,
+                new.owner_id,
+                &destination_url,
+                slug,
+                password_hash.as_deref(),
+                expires_at.as_deref(),
+            )
+            .await
+        }
+        None => {
+            create_with_generated_slug(
+                db,
+                new.owner_id,
+                &destination_url,
+                password_hash.as_deref(),
+                expires_at.as_deref(),
+                random_slug,
+            )
+            .await
+        }
     }
 }
 
@@ -132,6 +197,8 @@ async fn create_with_slug(
     owner_id: i64,
     destination_url: &str,
     slug: &str,
+    password_hash: Option<&str>,
+    expires_at: Option<&str>,
 ) -> Result<Link, ApiError> {
     let now = timeutil::now_rfc3339();
     let mut transaction = db.write_pool().begin_with("BEGIN IMMEDIATE").await?;
@@ -139,7 +206,16 @@ async fn create_with_slug(
         transaction.rollback().await?;
         return Err(ApiError::conflict("slug_taken", "Slug is already taken."));
     }
-    let link = insert_link(&mut transaction, owner_id, slug, destination_url, &now).await?;
+    let link = insert_link(
+        &mut transaction,
+        owner_id,
+        slug,
+        destination_url,
+        password_hash,
+        expires_at,
+        &now,
+    )
+    .await?;
     transaction.commit().await?;
     Ok(link)
 }
@@ -150,6 +226,8 @@ async fn create_with_generated_slug(
     db: &Database,
     owner_id: i64,
     destination_url: &str,
+    password_hash: Option<&str>,
+    expires_at: Option<&str>,
     mut next_slug: impl FnMut() -> Result<String, ApiError>,
 ) -> Result<Link, ApiError> {
     let now = timeutil::now_rfc3339();
@@ -159,7 +237,16 @@ async fn create_with_generated_slug(
         if slug_exists(&mut transaction, &slug).await? {
             continue;
         }
-        let link = insert_link(&mut transaction, owner_id, &slug, destination_url, &now).await?;
+        let link = insert_link(
+            &mut transaction,
+            owner_id,
+            &slug,
+            destination_url,
+            password_hash,
+            expires_at,
+            &now,
+        )
+        .await?;
         transaction.commit().await?;
         return Ok(link);
     }
@@ -674,15 +761,21 @@ async fn insert_link(
     owner_id: i64,
     slug: &str,
     destination_url: &str,
+    password_hash: Option<&str>,
+    expires_at: Option<&str>,
     now: &str,
 ) -> Result<Link, ApiError> {
     let result = sqlx::query(
-        "INSERT INTO links (owner_id, slug, destination_url, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO links
+         (owner_id, slug, destination_url, password_hash, password_version, expires_at,
+          created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
     )
     .bind(owner_id)
     .bind(slug)
     .bind(destination_url)
+    .bind(password_hash)
+    .bind(expires_at)
     .bind(now)
     .bind(now)
     .execute(&mut *connection)
@@ -693,9 +786,9 @@ async fn insert_link(
         owner_id,
         slug: slug.to_string(),
         destination_url: destination_url.to_string(),
-        has_password: false,
+        has_password: password_hash.is_some(),
         password_version: 1,
-        expires_at: None,
+        expires_at: expires_at.map(str::to_string),
         created_at: now.to_string(),
         updated_at: now.to_string(),
         total_clicks: 0,
@@ -781,14 +874,15 @@ mod tests {
             .expect("seed link");
 
         let mut candidates = ["taken123", "taken123", "free1234"].into_iter();
-        let link = create_with_generated_slug(&db, user.id, "https://example.com/", || {
-            candidates
-                .next()
-                .map(str::to_string)
-                .ok_or_else(|| ApiError::internal("no more candidates"))
-        })
-        .await
-        .expect("link created after retries");
+        let link =
+            create_with_generated_slug(&db, user.id, "https://example.com/", None, None, || {
+                candidates
+                    .next()
+                    .map(str::to_string)
+                    .ok_or_else(|| ApiError::internal("no more candidates"))
+            })
+            .await
+            .expect("link created after retries");
 
         assert_eq!(link.slug, "free1234");
     }
@@ -802,10 +896,11 @@ mod tests {
             .await
             .expect("seed link");
 
-        let result = create_with_generated_slug(&db, user.id, "https://example.com/", || {
-            Ok::<_, ApiError>("taken123".to_string())
-        })
-        .await;
+        let result =
+            create_with_generated_slug(&db, user.id, "https://example.com/", None, None, || {
+                Ok::<_, ApiError>("taken123".to_string())
+            })
+            .await;
 
         assert!(result.is_err(), "expected Slug generation to give up");
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM links")

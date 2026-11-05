@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in - tinylinkd</title>
+    <link rel="stylesheet" href="/_/static/admin.css">
+  </head>
+  <body>
+    <main class="login">
+      <h1>Sign in</h1>
+      {% match error %}
+      {% when Some with (message) %}
+      <p class="error" role="alert">{{ message }}</p>
+      {% when None %}
+      {% endmatch %}
+      <form method="post" action="/_/login">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" value="{{ username }}" required autofocus autocomplete="username">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required autocomplete="current-password">
+        <button type="submit">Sign in</button>
+      </form>
+    </main>
+  </body>
+</html>

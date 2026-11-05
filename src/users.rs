@@ -208,6 +208,34 @@ pub async fn list_users(
     Ok((users, total))
 }
 
+/// Verify a username and password for the browser login. Returns the User on
+/// success and `None` for an unknown username, a wrong password, or a disabled
+/// User, so the caller cannot distinguish the cases.
+pub async fn authenticate(
+    db: &Database,
+    username: &str,
+    password: &str,
+) -> Result<Option<User>, ApiError> {
+    let row = sqlx::query(&format!(
+        "SELECT {USER_SELECT}, password_hash FROM users WHERE username = ?"
+    ))
+    .bind(username)
+    .fetch_optional(db.read_pool())
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let user = user_from_row(&row)?;
+    if user.disabled_at.is_some() {
+        return Ok(None);
+    }
+    let password_hash: String = row.try_get("password_hash")?;
+    if !crate::auth::verify_password(password, &password_hash) {
+        return Ok(None);
+    }
+    Ok(Some(user))
+}
+
 #[derive(Debug, Clone)]
 pub struct UserChanges {
     /// `None` leaves the email unchanged; `Some(None)` clears it.
