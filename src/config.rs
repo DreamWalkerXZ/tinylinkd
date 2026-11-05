@@ -18,6 +18,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// Apply embedded database migrations and exit.
     Migrate(MigrateArgs),
+    /// Create a consistent SQLite backup and exit.
+    Backup(BackupArgs),
     /// Manage Users.
     Admin {
         #[command(subcommand)]
@@ -35,6 +37,7 @@ impl Command {
         match self {
             Self::Serve(args) => args.common.log_format,
             Self::Migrate(args) => args.common.log_format,
+            Self::Backup(args) => args.common.log_format,
             Self::Admin { command } => match command {
                 AdminCommand::Create(args) => args.common.log_format,
             },
@@ -125,6 +128,16 @@ pub struct ServeArgs {
 
 #[derive(Debug, Args)]
 pub struct MigrateArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BackupArgs {
+    /// Path of the SQLite snapshot to create. Must not already exist.
+    #[arg(long)]
+    pub output: PathBuf,
+
     #[command(flatten)]
     pub common: CommonArgs,
 }

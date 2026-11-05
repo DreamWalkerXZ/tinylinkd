@@ -80,3 +80,43 @@ fn connect_options(path: &Path) -> SqliteConnectOptions {
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5))
 }
+
+/// Create a consistent snapshot of the SQLite database with `VACUUM INTO`.
+///
+/// The live database must already exist; unlike [`Database::connect`], this
+/// does not create or migrate it, so a backup never changes the source.
+pub async fn backup(data_dir: &Path, output: &Path) -> Result<()> {
+    let source = data_dir.join("tinylinkd.db");
+    if !source.exists() {
+        bail!(
+            "database file {} does not exist; run `tld migrate` or start the server first",
+            source.display()
+        );
+    }
+    if output.exists() {
+        bail!(
+            "refusing to overwrite existing file {}; choose a new backup path",
+            output.display()
+        );
+    }
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(connect_options(&source))
+        .await
+        .with_context(|| format!("failed to open SQLite database {}", source.display()))?;
+
+    let destination = output
+        .to_str()
+        .context("backup output path must be valid UTF-8")?;
+    let result = sqlx::query("VACUUM INTO ?")
+        .bind(destination)
+        .execute(&pool)
+        .await;
+    pool.close().await;
+
+    result.map_err(|error| {
+        anyhow::anyhow!("failed to write backup to {}: {error}", output.display())
+    })?;
+    Ok(())
+}

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
+use sqlx::Connection;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -123,6 +124,117 @@ fn migrate_emits_json_logs_when_configured() {
     let json: serde_json::Value = serde_json::from_str(line).expect("json log");
     assert!(json.get("timestamp").is_some());
     assert!(json.get("level").is_some());
+}
+
+#[tokio::test]
+async fn backup_creates_a_snapshot_with_schema_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("data");
+
+    let output = tld_with_stdin(
+        &["admin", "create", "--username", "backup-user"],
+        &data_dir,
+        "hunter2\n",
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let backup_path = dir.path().join("snapshot.db");
+    let output = tld_command(
+        &[
+            "backup",
+            "--output",
+            backup_path.to_str().expect("utf8 path"),
+        ],
+        &data_dir,
+    )
+    .env_remove("TLD_BASE_URL")
+    .output()
+    .expect("run tld");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(backup_path.exists(), "backup file was not created");
+    assert!(
+        data_dir.join("tinylinkd.db").exists(),
+        "backup must not move the live database"
+    );
+
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&backup_path)
+        .read_only(true);
+    let mut connection = sqlx::sqlite::SqliteConnection::connect_with(&options)
+        .await
+        .expect("open backup");
+
+    let username: String = sqlx::query_scalar("SELECT username FROM users")
+        .fetch_one(&mut connection)
+        .await
+        .expect("users table in the backup");
+    assert_eq!(username, "backup-user");
+
+    let migrations: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 1")
+            .fetch_one(&mut connection)
+            .await
+            .expect("migration history in the backup");
+    assert!(migrations >= 1, "backup is missing schema migrations");
+
+    let settings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings")
+        .fetch_one(&mut connection)
+        .await
+        .expect("settings in the backup");
+    assert_eq!(settings, 4, "backup is missing default Instance settings");
+
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&mut connection)
+        .await
+        .expect("integrity check");
+    assert_eq!(integrity, "ok");
+}
+
+#[test]
+fn backup_refuses_to_overwrite_an_existing_output_file() {
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("data");
+    let output = tld_command(&["migrate"], &data_dir)
+        .output()
+        .expect("run tld");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let backup_path = dir.path().join("existing.db");
+    std::fs::write(&backup_path, b"do not clobber me").expect("seed existing file");
+
+    let output = tld_command(
+        &[
+            "backup",
+            "--output",
+            backup_path.to_str().expect("utf8 path"),
+        ],
+        &data_dir,
+    )
+    .env_remove("TLD_BASE_URL")
+    .output()
+    .expect("run tld");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("refusing to overwrite"), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read(&backup_path).expect("read existing file"),
+        b"do not clobber me",
+        "backup modified an existing file"
+    );
 }
 
 #[cfg(unix)]
