@@ -142,19 +142,10 @@ fn serve_shuts_down_gracefully_on_sigterm() {
         .spawn()
         .expect("spawn tld serve");
 
-    let mut ready = false;
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    if !ready {
+    if !wait_until_health(port) {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("tld serve did not start listening on port {port}");
+        panic!("tld serve did not become healthy on port {port}");
     }
 
     let kill_status = Command::new("kill")
@@ -184,10 +175,22 @@ fn free_port() -> u16 {
     listener.local_addr().expect("local addr").port()
 }
 
-fn wait_until_listening(port: u16) -> bool {
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return true;
+fn wait_until_health(port: u16) -> bool {
+    for _ in 0..60 {
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let request = format!(
+                "GET /_/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            );
+            if stream.write_all(request.as_bytes()).is_ok() {
+                let mut response = String::new();
+                if stream.read_to_string(&mut response).is_ok()
+                    && response.starts_with("HTTP/1.1 200")
+                    && response.contains("\"status\":\"ok\"")
+                {
+                    return true;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -349,8 +352,8 @@ fn serve_bootstraps_the_first_admin_from_environment() {
         .expect("spawn tld serve");
     let mut child = ChildGuard(child);
 
-    if !wait_until_listening(port) {
-        panic!("tld serve did not start listening on port {port}");
+    if !wait_until_health(port) {
+        panic!("tld serve did not become healthy on port {port}");
     }
 
     let output = tld_command(&["token", "create", "--user", "boot"], dir.path())
