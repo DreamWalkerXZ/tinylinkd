@@ -17,7 +17,13 @@ async fn openapi_document_covers_auth_and_token_routes() {
     );
     let document = response.json();
     assert_eq!(document["openapi"], "3.1.0");
-    for path in ["/_/api/v1/me", "/_/api/v1/tokens", "/_/api/v1/tokens/{id}"] {
+    for path in [
+        "/_/api/v1/me",
+        "/_/api/v1/tokens",
+        "/_/api/v1/tokens/{id}",
+        "/_/api/v1/links",
+        "/_/api/v1/links/{id}",
+    ] {
         assert!(
             document["paths"].get(path).is_some(),
             "missing path {path}: {document}"
@@ -27,6 +33,15 @@ async fn openapi_document_covers_auth_and_token_routes() {
     assert!(document["paths"]["/_/api/v1/tokens"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/tokens"]["post"].is_object());
     assert!(document["paths"]["/_/api/v1/tokens/{id}"]["delete"].is_object());
+    assert!(document["paths"]["/_/api/v1/links"]["get"].is_object());
+    assert!(document["paths"]["/_/api/v1/links"]["post"].is_object());
+    assert!(document["paths"]["/_/api/v1/links/{id}"]["get"].is_object());
+    assert!(
+        document["components"]["schemas"]
+            .get("LinkResponse")
+            .is_some(),
+        "missing LinkResponse schema: {document}"
+    );
     assert_eq!(
         document["components"]["securitySchemes"]["bearerAuth"]["type"],
         "http"
