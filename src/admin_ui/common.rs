@@ -62,6 +62,7 @@ pub(super) fn see_other(location: &'static str) -> Response {
 ///
 /// The caller returns the error response unchanged when settings cannot be
 /// loaded, so every admin page fails the same way.
+#[allow(clippy::result_large_err)] // The Response is the handler's short-circuit value.
 pub(super) async fn load_settings_or_error(
     state: &AppState,
 ) -> Result<settings::InstanceSettings, Response> {

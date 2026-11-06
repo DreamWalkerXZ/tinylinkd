@@ -442,6 +442,7 @@ pub(super) async fn link_detail(
 
 /// Load a Link for an Admin UI action, returning the appropriate error page
 /// when it does not exist or the current User may not manage it.
+#[allow(clippy::result_large_err)] // The Response is the handler's short-circuit value.
 async fn require_manageable_link(
     state: &AppState,
     session_user: &SessionUser,
