@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use axum::http::HeaderMap;
-use axum::http::header;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sqlx::Row;
@@ -156,13 +155,7 @@ pub async fn revoke(db: &Database, session_id: i64) -> Result<(), ApiError> {
 
 /// Find a cookie value by name across all `Cookie` headers.
 pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .filter_map(|pair| pair.trim().split_once('='))
-        .find_map(|(key, value)| (key.trim() == name).then(|| value.to_string()))
+    crate::cookies::cookie_value(headers, name)
 }
 
 /// An authenticated browser session.

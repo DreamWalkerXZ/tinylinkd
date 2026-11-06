@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, Uri};
+use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,7 @@ use utoipa::ToSchema;
 use crate::analytics::{self, TimeRange};
 use crate::app::{AppConfig, AppState};
 use crate::auth::{AdminUser, CurrentUser};
+use crate::error::ApiError;
 use crate::invites;
 use crate::links::{self, LinkStatus};
 use crate::password_resets;
@@ -78,6 +81,69 @@ pub fn router() -> Router<AppState> {
             post(accept_password_reset),
         )
         .route("/_/api/openapi.json", get(openapi))
+}
+
+/// The request path, extracted once and used as the Problem Details
+/// `instance`.
+///
+/// The `Deref` to `str` lets helpers that only need the path string borrow it
+/// directly, and [`ProblemContext`] fills it into errors consistently.
+#[derive(Debug, Clone)]
+struct ApiPath(String);
+
+impl ApiPath {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for ApiPath {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<S> FromRequestParts<S> for ApiPath
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(parts.uri.path().to_string()))
+    }
+}
+
+/// Convert a fallible extractor or domain call into Problem Details, using
+/// the request path as the `instance`.
+trait ProblemContext<T> {
+    fn problem(self, path: &ApiPath) -> Result<T, ProblemDetails>;
+}
+
+impl<T> ProblemContext<T> for Result<T, ApiError> {
+    fn problem(self, path: &ApiPath) -> Result<T, ProblemDetails> {
+        self.map_err(|error| error.into_problem(path.as_str()))
+    }
+}
+
+impl<T> ProblemContext<T> for Result<T, JsonRejection> {
+    fn problem(self, path: &ApiPath) -> Result<T, ProblemDetails> {
+        self.map_err(|rejection| json_rejection_problem(rejection, path.as_str()))
+    }
+}
+
+impl<T> ProblemContext<T> for Result<T, PathRejection> {
+    fn problem(self, path: &ApiPath) -> Result<T, ProblemDetails> {
+        self.map_err(|rejection| path_rejection_problem(rejection, path.as_str()))
+    }
+}
+
+impl<T> ProblemContext<T> for Result<T, QueryRejection> {
+    fn problem(self, path: &ApiPath) -> Result<T, ProblemDetails> {
+        self.map_err(|rejection| pagination_problem(rejection, path.as_str()))
+    }
 }
 
 #[derive(utoipa::OpenApi)]
@@ -257,11 +323,10 @@ pub struct UpdateProfileRequest {
 async fn update_me(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     payload: Result<Json<UpdateProfileRequest>, JsonRejection>,
 ) -> Result<Json<UserProfile>, ProblemDetails> {
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Json(payload) = payload.problem(&uri)?;
     let updated = crate::users::update_email(
         &state.db,
         user.id(),
@@ -270,7 +335,7 @@ async fn update_me(
         },
     )
     .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    .problem(&uri)?;
     Ok(Json(UserProfile::from(updated)))
 }
 
@@ -295,11 +360,10 @@ pub struct ChangePasswordRequest {
 async fn change_password(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     payload: Result<Json<ChangePasswordRequest>, JsonRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Json(payload) = payload.problem(&uri)?;
     crate::users::change_password(
         &state.db,
         user.id(),
@@ -307,7 +371,7 @@ async fn change_password(
         &payload.new_password,
     )
     .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    .problem(&uri)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -334,14 +398,13 @@ pub struct DeleteAccountRequest {
 async fn delete_me(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     payload: Result<Json<DeleteAccountRequest>, JsonRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Json(payload) = payload.problem(&uri)?;
     crate::users::delete_own_account(&state.db, user.id(), &payload.password)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -372,14 +435,14 @@ pub struct UserListResponse {
 async fn list_users(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     query: Result<Query<Pagination>, QueryRejection>,
 ) -> Result<Json<UserListResponse>, ProblemDetails> {
-    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
+    let query = query.problem(&uri)?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, &uri)?;
     let (items, total) = crate::users::list_users(&state.db, limit, offset)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(Json(UserListResponse {
         items: items.into_iter().map(UserProfile::from).collect(),
         total,
@@ -404,14 +467,14 @@ async fn list_users(
 async fn get_user(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
 ) -> Result<Json<UserProfile>, ProblemDetails> {
-    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path(user_id) = path.problem(&uri)?;
     let user = crate::users::find_by_id(&state.db, user_id)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?
-        .ok_or_else(|| ProblemDetails::not_found("User not found.", uri.path()))?;
+        .problem(&uri)?
+        .ok_or_else(|| ProblemDetails::not_found("User not found.", &uri))?;
     Ok(Json(UserProfile::from(user)))
 }
 
@@ -446,13 +509,12 @@ pub struct UpdateUserRequest {
 async fn update_user(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
     payload: Result<Json<UpdateUserRequest>, JsonRejection>,
 ) -> Result<Json<UserProfile>, ProblemDetails> {
-    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Path(user_id) = path.problem(&uri)?;
+    let Json(payload) = payload.problem(&uri)?;
     let user = crate::users::update_user(
         &state.db,
         user_id,
@@ -462,7 +524,7 @@ async fn update_user(
         },
     )
     .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    .problem(&uri)?;
     Ok(Json(UserProfile::from(user)))
 }
 
@@ -483,13 +545,13 @@ async fn update_user(
 async fn delete_user(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
-    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path(user_id) = path.problem(&uri)?;
     crate::users::delete_user(&state.db, user_id)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -514,23 +576,23 @@ async fn delete_user(
 async fn list_user_tokens(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
     query: Result<Query<Pagination>, QueryRejection>,
 ) -> Result<Json<TokenListResponse>, ProblemDetails> {
-    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
+    let Path(user_id) = path.problem(&uri)?;
+    let query = query.problem(&uri)?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, &uri)?;
     let exists = crate::users::find_by_id(&state.db, user_id)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?
+        .problem(&uri)?
         .is_some();
     if !exists {
-        return Err(ProblemDetails::not_found("User not found.", uri.path()));
+        return Err(ProblemDetails::not_found("User not found.", &uri));
     }
     let (items, total) = tokens::list_tokens(&state.db, user_id, limit, offset)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(Json(TokenListResponse {
         items: items.into_iter().map(TokenResponse::from).collect(),
         total,
@@ -558,13 +620,12 @@ async fn list_user_tokens(
 async fn create_user_token(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
     payload: Result<Json<CreateTokenRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<CreatedTokenResponse>), ProblemDetails> {
-    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Path(user_id) = path.problem(&uri)?;
+    let Json(payload) = payload.problem(&uri)?;
     let created = tokens::create_token(
         &state.db,
         user_id,
@@ -572,7 +633,7 @@ async fn create_user_token(
         payload.expires_at.as_deref(),
     )
     .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    .problem(&uri)?;
     Ok((
         StatusCode::CREATED,
         Json(CreatedTokenResponse::from(created)),
@@ -598,21 +659,20 @@ async fn create_user_token(
 async fn revoke_user_token(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<(i64, i64)>, PathRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
-    let Path((user_id, token_id)) =
-        path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path((user_id, token_id)) = path.problem(&uri)?;
     let exists = crate::users::find_by_id(&state.db, user_id)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?
+        .problem(&uri)?
         .is_some();
     if !exists {
-        return Err(ProblemDetails::not_found("User not found.", uri.path()));
+        return Err(ProblemDetails::not_found("User not found.", &uri));
     }
     tokens::revoke_token(&state.db, user_id, token_id)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -840,15 +900,14 @@ impl LinkResponse {
 async fn create_link(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     payload: Result<Json<CreateLinkRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<LinkResponse>), ProblemDetails> {
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Json(payload) = payload.problem(&uri)?;
     if let Some(retry_after) = state.link_create_limiter.check_and_record(&user.id()) {
         return Err(ProblemDetails::rate_limited(
             "The Link creation rate limit has been exceeded.",
-            uri.path(),
+            &uri,
             retry_after,
         ));
     }
@@ -863,7 +922,7 @@ async fn create_link(
         },
     )
     .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    .problem(&uri)?;
     Ok((
         StatusCode::CREATED,
         Json(LinkResponse::from_link(link, &state.config)),
@@ -948,11 +1007,11 @@ fn parse_link_sort(value: Option<&str>, instance: &str) -> Result<links::LinkSor
 async fn list_links(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     query: Result<Query<ListLinksQuery>, QueryRejection>,
 ) -> Result<Json<LinkListResponse>, ProblemDetails> {
-    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
+    let query = query.problem(&uri)?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, &uri)?;
     let is_admin = user.is_admin();
     if query.owner_id.is_some() && !is_admin {
         return Err(ProblemDetails::new(
@@ -960,7 +1019,7 @@ async fn list_links(
             "forbidden",
             "Forbidden",
             "Only Admins may filter Links by owner_id.",
-            uri.path(),
+            uri.as_str(),
         ));
     }
     let filter = links::LinkFilter {
@@ -969,15 +1028,13 @@ async fn list_links(
         } else {
             Some(user.id())
         },
-        status: parse_link_status(query.status.as_deref(), uri.path())?,
+        status: parse_link_status(query.status.as_deref(), &uri)?,
         q: query.q.clone(),
-        sort: parse_link_sort(query.sort.as_deref(), uri.path())?,
+        sort: parse_link_sort(query.sort.as_deref(), &uri)?,
         limit,
         offset,
     };
-    let (links, total) = links::list_links(&state.db, &filter)
-        .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+    let (links, total) = links::list_links(&state.db, &filter).await.problem(&uri)?;
     Ok(Json(LinkListResponse {
         items: links
             .into_iter()
@@ -1005,15 +1062,12 @@ async fn list_links(
 async fn get_link(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
 ) -> Result<Json<LinkResponse>, ProblemDetails> {
-    let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    let Some(link) = links::find_by_id(&state.db, link_id)
-        .await
-        .map_err(|error| error.into_problem(uri.path()))?
-    else {
-        return Err(ProblemDetails::not_found("Link not found.", uri.path()));
+    let Path(link_id) = path.problem(&uri)?;
+    let Some(link) = links::find_by_id(&state.db, link_id).await.problem(&uri)? else {
+        return Err(ProblemDetails::not_found("Link not found.", &uri));
     };
     if !links::can_manage(&link, user.id(), user.is_admin()) {
         return Err(ProblemDetails::new(
@@ -1021,7 +1075,7 @@ async fn get_link(
             "forbidden",
             "Forbidden",
             "You do not have permission to read this Link.",
-            uri.path(),
+            uri.as_str(),
         ));
     }
     Ok(Json(LinkResponse::from_link(link, &state.config)))
@@ -1046,13 +1100,12 @@ async fn get_link(
 async fn update_link(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
     payload: Result<Json<UpdateLinkRequest>, JsonRejection>,
 ) -> Result<Json<LinkResponse>, ProblemDetails> {
-    let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Path(link_id) = path.problem(&uri)?;
+    let Json(payload) = payload.problem(&uri)?;
     let updated = links::update_link(
         &state.db,
         link_id,
@@ -1067,7 +1120,7 @@ async fn update_link(
         },
     )
     .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    .problem(&uri)?;
     Ok(Json(
         LinkResponse::from_link(updated.link, &state.config).with_warning(updated.warning),
     ))
@@ -1089,13 +1142,13 @@ async fn update_link(
 async fn delete_link(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
-    let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path(link_id) = path.problem(&uri)?;
     links::delete_link(&state.db, link_id, user.id(), user.is_admin())
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1214,21 +1267,21 @@ async fn ensure_link_readable(
 async fn list_link_clicks(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
     query: Result<Query<ListClicksQuery>, QueryRejection>,
 ) -> Result<Json<ClickListResponse>, ProblemDetails> {
-    let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
-    ensure_link_readable(&state, &user, link_id, uri.path()).await?;
+    let Path(link_id) = path.problem(&uri)?;
+    let query = query.problem(&uri)?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, &uri)?;
+    ensure_link_readable(&state, &user, link_id, &uri).await?;
     let range = TimeRange {
-        from: parse_time_bound(query.from.as_deref(), "from", uri.path())?,
-        to: parse_time_bound(query.to.as_deref(), "to", uri.path())?,
+        from: parse_time_bound(query.from.as_deref(), "from", &uri)?,
+        to: parse_time_bound(query.to.as_deref(), "to", &uri)?,
     };
     let (clicks, total) = analytics::list_clicks(&state.db, link_id, range, limit, offset)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(Json(ClickListResponse {
         items: clicks.into_iter().map(ClickResponse::from).collect(),
         total,
@@ -1328,24 +1381,22 @@ fn parse_stats_interval(value: Option<&str>, instance: &str) -> Result<(), Probl
 async fn link_stats(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
     query: Result<Query<LinkStatsQuery>, QueryRejection>,
 ) -> Result<Json<LinkStatsResponse>, ProblemDetails> {
-    let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    parse_stats_interval(query.interval.as_deref(), uri.path())?;
-    ensure_link_readable(&state, &user, link_id, uri.path()).await?;
+    let Path(link_id) = path.problem(&uri)?;
+    let query = query.problem(&uri)?;
+    parse_stats_interval(query.interval.as_deref(), &uri)?;
+    ensure_link_readable(&state, &user, link_id, &uri).await?;
     let range = TimeRange {
-        from: parse_time_bound(query.from.as_deref(), "from", uri.path())?,
-        to: parse_time_bound(query.to.as_deref(), "to", uri.path())?,
+        from: parse_time_bound(query.from.as_deref(), "from", &uri)?,
+        to: parse_time_bound(query.to.as_deref(), "to", &uri)?,
     };
-    let instance_settings = settings::load(&state.db)
-        .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+    let instance_settings = settings::load(&state.db).await.problem(&uri)?;
     let stats = analytics::click_stats(&state.db, link_id, range, &instance_settings.timezone)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(Json(LinkStatsResponse::from(stats)))
 }
 
@@ -1375,14 +1426,14 @@ pub struct TokenListResponse {
 async fn list_tokens(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     query: Result<Query<Pagination>, QueryRejection>,
 ) -> Result<Json<TokenListResponse>, ProblemDetails> {
-    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
+    let query = query.problem(&uri)?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, &uri)?;
     let (items, total) = tokens::list_tokens(&state.db, user.id(), limit, offset)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(Json(TokenListResponse {
         items: items.into_iter().map(TokenResponse::from).collect(),
         total,
@@ -1406,11 +1457,10 @@ async fn list_tokens(
 async fn create_token(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     payload: Result<Json<CreateTokenRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<CreatedTokenResponse>), ProblemDetails> {
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Json(payload) = payload.problem(&uri)?;
     let created = tokens::create_token(
         &state.db,
         user.id(),
@@ -1418,7 +1468,7 @@ async fn create_token(
         payload.expires_at.as_deref(),
     )
     .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    .problem(&uri)?;
     Ok((
         StatusCode::CREATED,
         Json(CreatedTokenResponse::from(created)),
@@ -1452,13 +1502,13 @@ fn path_rejection_problem(rejection: PathRejection, instance: &str) -> ProblemDe
 async fn revoke_token(
     State(state): State<AppState>,
     user: CurrentUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
-    let Path(token_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path(token_id) = path.problem(&uri)?;
     tokens::revoke_token(&state.db, user.id(), token_id)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1510,11 +1560,9 @@ pub struct UpdateSettingsRequest {
 async fn get_settings(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
 ) -> Result<Json<SettingsResponse>, ProblemDetails> {
-    let settings = settings::load(&state.db)
-        .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+    let settings = settings::load(&state.db).await.problem(&uri)?;
     Ok(Json(SettingsResponse::from(settings)))
 }
 
@@ -1534,11 +1582,10 @@ async fn get_settings(
 async fn update_settings(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     payload: Result<Json<UpdateSettingsRequest>, JsonRejection>,
 ) -> Result<Json<SettingsResponse>, ProblemDetails> {
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Json(payload) = payload.problem(&uri)?;
     let settings = settings::update(
         &state.db,
         settings::SettingsChanges {
@@ -1549,7 +1596,7 @@ async fn update_settings(
         },
     )
     .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    .problem(&uri)?;
     Ok(Json(SettingsResponse::from(settings)))
 }
 
@@ -1606,14 +1653,14 @@ pub struct InviteListResponse {
 async fn list_invites(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     query: Result<Query<Pagination>, QueryRejection>,
 ) -> Result<Json<InviteListResponse>, ProblemDetails> {
-    let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
-    let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
+    let query = query.problem(&uri)?;
+    let (limit, offset) = resolve_pagination(query.limit, query.offset, &uri)?;
     let (items, total) = invites::list_invites(&state.db, limit, offset)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(Json(InviteListResponse {
         items: items.into_iter().map(InviteResponse::from).collect(),
         total,
@@ -1656,11 +1703,11 @@ impl From<invites::CreatedInvite> for CreatedInviteResponse {
 async fn create_invite(
     State(state): State<AppState>,
     admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
 ) -> Result<(StatusCode, Json<CreatedInviteResponse>), ProblemDetails> {
-    let created = invites::create_invite(&state.db, admin.current.user.id)
+    let created = invites::create_invite(&state.db, admin.current.id())
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok((
         StatusCode::CREATED,
         Json(CreatedInviteResponse::from(created)),
@@ -1684,14 +1731,13 @@ async fn create_invite(
 async fn revoke_invite(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
-    let Path(invite_id) =
-        path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path(invite_id) = path.problem(&uri)?;
     invites::revoke_invite(&state.db, invite_id)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1714,13 +1760,13 @@ pub struct InviteValidationResponse {
 )]
 async fn validate_invite(
     State(state): State<AppState>,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<InviteValidationResponse>, ProblemDetails> {
-    let Path(token) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path(token) = path.problem(&uri)?;
     let validation = invites::validate_invite(&state.db, &token)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(Json(InviteValidationResponse {
         status: validation.status.as_validation_str().to_string(),
         expires_at: validation.expires_at,
@@ -1750,13 +1796,12 @@ pub struct AcceptInviteRequest {
 )]
 async fn accept_invite(
     State(state): State<AppState>,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<String>, PathRejection>,
     payload: Result<Json<AcceptInviteRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<UserProfile>), ProblemDetails> {
-    let Path(token) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Path(token) = path.problem(&uri)?;
+    let Json(payload) = payload.problem(&uri)?;
     let user = invites::accept_invite(
         &state.db,
         &token,
@@ -1767,7 +1812,7 @@ async fn accept_invite(
         },
     )
     .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    .problem(&uri)?;
     Ok((StatusCode::CREATED, Json(UserProfile::from(user))))
 }
 
@@ -1807,13 +1852,13 @@ impl From<password_resets::CreatedPasswordReset> for CreatedPasswordResetRespons
 async fn create_password_reset(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<i64>, PathRejection>,
 ) -> Result<(StatusCode, Json<CreatedPasswordResetResponse>), ProblemDetails> {
-    let Path(user_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path(user_id) = path.problem(&uri)?;
     let created = password_resets::create_password_reset(&state.db, user_id)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok((
         StatusCode::CREATED,
         Json(CreatedPasswordResetResponse::from(created)),
@@ -1837,16 +1882,16 @@ async fn create_password_reset(
 async fn revoke_password_reset(
     State(state): State<AppState>,
     _admin: AdminUser,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
-    let Path(id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path(id) = path.problem(&uri)?;
     let id: i64 = id
         .parse()
-        .map_err(|_| ProblemDetails::not_found("Password-reset token not found.", uri.path()))?;
+        .map_err(|_| ProblemDetails::not_found("Password-reset token not found.", &uri))?;
     password_resets::revoke_password_reset(&state.db, id)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1869,15 +1914,15 @@ pub struct PasswordResetValidationResponse {
 )]
 async fn validate_password_reset(
     State(state): State<AppState>,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<PasswordResetValidationResponse>, ProblemDetails> {
-    let Path(token) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let Path(token) = path.problem(&uri)?;
     let validation = password_resets::validate_password_reset(&state.db, &token)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(Json(PasswordResetValidationResponse {
-        status: validation.status.as_str().to_string(),
+        status: validation.status.as_validation_str().to_string(),
         expires_at: validation.expires_at,
     }))
 }
@@ -1903,15 +1948,14 @@ pub struct AcceptPasswordResetRequest {
 )]
 async fn accept_password_reset(
     State(state): State<AppState>,
-    uri: Uri,
+    uri: ApiPath,
     path: Result<Path<String>, PathRejection>,
     payload: Result<Json<AcceptPasswordResetRequest>, JsonRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
-    let Path(token) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    let Json(payload) =
-        payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
+    let Path(token) = path.problem(&uri)?;
+    let Json(payload) = payload.problem(&uri)?;
     password_resets::accept_password_reset(&state.db, &token, &payload.password)
         .await
-        .map_err(|error| error.into_problem(uri.path()))?;
+        .problem(&uri)?;
     Ok(StatusCode::NO_CONTENT)
 }

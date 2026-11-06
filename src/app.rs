@@ -98,10 +98,7 @@ async fn add_nosniff_to_json(request: Request, next: Next) -> Response {
             value.starts_with("application/json") || value.starts_with("application/problem+json")
         });
     if is_json {
-        response.headers_mut().insert(
-            header::X_CONTENT_TYPE_OPTIONS,
-            HeaderValue::from_static("nosniff"),
-        );
+        crate::security_headers::add_nosniff(response.headers_mut());
     }
     response
 }

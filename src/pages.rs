@@ -1,5 +1,5 @@
 use askama::Template;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 
 #[derive(Template)]
@@ -65,18 +65,6 @@ pub fn password_form(
 
 fn html_response(status: StatusCode, html: String) -> Response {
     let mut response = (status, Html(html)).into_response();
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'self'"),
-    );
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
+    crate::security_headers::add_html_security_headers(response.headers_mut());
     response
 }
