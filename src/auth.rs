@@ -112,6 +112,16 @@ pub struct CurrentUser {
     pub token_id: i64,
 }
 
+impl CurrentUser {
+    pub fn id(&self) -> i64 {
+        self.user.id
+    }
+
+    pub fn is_admin(&self) -> bool {
+        self.user.role == Role::Admin
+    }
+}
+
 impl FromRequestParts<AppState> for CurrentUser {
     type Rejection = ProblemDetails;
 
@@ -201,6 +211,14 @@ impl FromRequestParts<AppState> for CurrentUser {
             ));
         }
 
+        if let Some(retry_after) = state.api_rate_limiter.check_and_record(&token_summary.id) {
+            return Err(ProblemDetails::rate_limited(
+                "The API request rate limit has been exceeded.",
+                &instance,
+                retry_after,
+            ));
+        }
+
         let now = timeutil::now_rfc3339();
         if let Err(error) = sqlx::query("UPDATE api_tokens SET last_used_at = ? WHERE id = ?")
             .bind(&now)
@@ -239,7 +257,7 @@ impl FromRequestParts<AppState> for AdminUser {
     ) -> Result<Self, Self::Rejection> {
         let instance = parts.uri.path().to_string();
         let current = CurrentUser::from_request_parts(parts, state).await?;
-        if current.user.role != Role::Admin {
+        if !current.is_admin() {
             return Err(ProblemDetails::new(
                 StatusCode::FORBIDDEN,
                 "forbidden",

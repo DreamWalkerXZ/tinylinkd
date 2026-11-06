@@ -62,11 +62,20 @@ fn push_time_range<'a>(
     from: Option<&'a str>,
     to: Option<&'a str>,
 ) {
+    // Stored timestamps may or may not carry fractional seconds, so a text
+    // comparison would misorder Clicks at a whole-second boundary. Compare
+    // the instants instead; both bounds are inclusive.
     if let Some(from) = from {
-        builder.push(" AND clicked_at >= ").push_bind(from);
+        builder
+            .push(" AND julianday(clicked_at) >= julianday(")
+            .push_bind(from)
+            .push(")");
     }
     if let Some(to) = to {
-        builder.push(" AND clicked_at <= ").push_bind(to);
+        builder
+            .push(" AND julianday(clicked_at) <= julianday(")
+            .push_bind(to)
+            .push(")");
     }
 }
 

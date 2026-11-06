@@ -1,6 +1,4 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::http::HeaderMap;
 use axum::http::header;
@@ -11,6 +9,7 @@ use sqlx::Row;
 use crate::auth::{constant_time_eq, hash_token};
 use crate::db::Database;
 use crate::error::ApiError;
+use crate::ratelimit::RateLimiter;
 use crate::timeutil;
 
 /// The browser session cookie for the admin UI.
@@ -282,59 +281,32 @@ pub async fn is_valid(db: &Database, plaintext: &str) -> Result<bool, ApiError> 
 /// Process-local failed-login limiter keyed by client IP. A single-instance
 /// deployment needs no external store; expired failures are pruned whenever a
 /// new one is recorded.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LoginAttemptLimiter {
-    failures: Mutex<HashMap<String, VecDeque<Instant>>>,
+    failures: RateLimiter<String>,
 }
 
 impl LoginAttemptLimiter {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, VecDeque<Instant>>> {
-        self.failures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        Self {
+            failures: RateLimiter::new(LOGIN_FAILURE_LIMIT, LOGIN_FAILURE_WINDOW),
+        }
     }
 
     /// When this IP is rate-limited, returns the seconds to advertise in
     /// `Retry-After`.
     pub fn check(&self, ip: &str) -> Option<u64> {
-        let now = Instant::now();
-        let mut failures = self.lock();
-        let entry = failures.get_mut(ip)?;
-        while entry
-            .front()
-            .is_some_and(|oldest| now.duration_since(*oldest) >= LOGIN_FAILURE_WINDOW)
-        {
-            entry.pop_front();
-        }
-        if entry.len() < LOGIN_FAILURE_LIMIT {
-            return None;
-        }
-        let oldest = *entry.front().expect("a limited entry has failures");
-        Some(
-            LOGIN_FAILURE_WINDOW
-                .saturating_sub(now.duration_since(oldest))
-                .as_secs()
-                .max(1),
-        )
+        self.failures.check(&ip.to_string())
     }
 
     /// Record a failed login attempt.
     pub fn record_failure(&self, ip: &str) {
-        let now = Instant::now();
-        let mut failures = self.lock();
-        failures.retain(|_, times| {
-            while times
-                .front()
-                .is_some_and(|oldest| now.duration_since(*oldest) >= LOGIN_FAILURE_WINDOW)
-            {
-                times.pop_front();
-            }
-            !times.is_empty()
-        });
-        failures.entry(ip.to_string()).or_default().push_back(now);
+        self.failures.record(&ip.to_string());
+    }
+}
+
+impl Default for LoginAttemptLimiter {
+    fn default() -> Self {
+        Self::new()
     }
 }

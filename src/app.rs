@@ -11,6 +11,9 @@ use url::Url;
 
 use crate::db::Database;
 use crate::problems::ProblemDetails;
+use crate::ratelimit::{
+    API_REQUEST_LIMIT, API_REQUEST_WINDOW, LINK_CREATION_LIMIT, LINK_CREATION_WINDOW, RateLimiter,
+};
 use crate::sessions::LoginAttemptLimiter;
 use crate::unlock::PasswordAttemptLimiter;
 
@@ -49,6 +52,8 @@ pub struct AppState {
     pub config: AppConfig,
     pub unlock_limiter: Arc<PasswordAttemptLimiter>,
     pub login_limiter: Arc<LoginAttemptLimiter>,
+    pub link_create_limiter: Arc<RateLimiter<i64>>,
+    pub api_rate_limiter: Arc<RateLimiter<i64>>,
 }
 
 /// Build the router with a test default base URL and proxy trust disabled.
@@ -64,6 +69,8 @@ pub fn build_router_with_config(db: Database, config: AppConfig) -> Router {
         config,
         unlock_limiter: Arc::new(PasswordAttemptLimiter::new()),
         login_limiter: Arc::new(LoginAttemptLimiter::new()),
+        link_create_limiter: Arc::new(RateLimiter::new(LINK_CREATION_LIMIT, LINK_CREATION_WINDOW)),
+        api_rate_limiter: Arc::new(RateLimiter::new(API_REQUEST_LIMIT, API_REQUEST_WINDOW)),
     };
     Router::new()
         .route("/_/health", get(health))
@@ -71,11 +78,32 @@ pub fn build_router_with_config(db: Database, config: AppConfig) -> Router {
         .merge(crate::api::router())
         .merge(crate::redirect::router())
         .fallback(fallback)
+        .layer(middleware::from_fn(add_nosniff_to_json))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             refresh_session_cookie,
         ))
         .with_state(state)
+}
+
+/// API responses are JSON or Problem Details; both must disable content-type
+/// sniffing. HTML responses set their own security headers.
+async fn add_nosniff_to_json(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let is_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.starts_with("application/json") || value.starts_with("application/problem+json")
+        });
+    if is_json {
+        response.headers_mut().insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+    }
+    response
 }
 
 /// Re-issue the browser session cookie on authenticated admin UI responses.

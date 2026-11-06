@@ -816,6 +816,71 @@ async fn public_password_reset_validation_reports_every_state() {
     assert_eq!(unknown.json()["code"], "not_found");
 }
 
+#[tokio::test]
+async fn admins_revoke_a_password_reset_and_it_stops_validating() {
+    let context = TestContext::new().await;
+    let (_admin, admin_token) = bootstrap_admin_with_token(&context).await;
+    let (bob, bob_token) = create_regular_user_with_token(&context, "bob").await;
+
+    let reset = create_password_reset(&context, &admin_token, bob.id).await;
+    let id = reset["id"].as_i64().expect("reset id");
+    let token = reset["token"].as_str().expect("reset token");
+
+    let forbidden = context
+        .delete(&format!("/_/api/v1/password-resets/{id}"), Some(&bob_token))
+        .await;
+    assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
+    assert_eq!(forbidden.content_type(), "application/problem+json");
+
+    let revoked = context
+        .delete(
+            &format!("/_/api/v1/password-resets/{id}"),
+            Some(&admin_token),
+        )
+        .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+    assert!(revoked.body.is_empty(), "204 must have an empty body");
+
+    let validation = context
+        .get(&format!("/_/api/v1/password-resets/{token}"), None)
+        .await
+        .json();
+    assert_eq!(validation["status"], "revoked");
+
+    let accept = context
+        .post(
+            &format!("/_/api/v1/password-resets/{token}/accept"),
+            None,
+            json!({"password": "a brand new password"}),
+        )
+        .await;
+    assert_eq!(accept.status, StatusCode::CONFLICT);
+    assert_eq!(accept.json()["code"], "password_reset_revoked");
+
+    let again = context
+        .delete(
+            &format!("/_/api/v1/password-resets/{id}"),
+            Some(&admin_token),
+        )
+        .await;
+    assert_eq!(
+        again.status,
+        StatusCode::NO_CONTENT,
+        "revoking is idempotent"
+    );
+
+    let unknown = context
+        .delete("/_/api/v1/password-resets/9999", Some(&admin_token))
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown.content_type(), "application/problem+json");
+
+    let not_an_id = context
+        .delete("/_/api/v1/password-resets/not-an-id", Some(&admin_token))
+        .await;
+    assert_eq!(not_an_id.status, StatusCode::NOT_FOUND);
+}
+
 async fn user_password_hash(context: &TestContext, user_id: i64) -> String {
     let row = sqlx::query("SELECT password_hash FROM users WHERE id = ?")
         .bind(user_id)

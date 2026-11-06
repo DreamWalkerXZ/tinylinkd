@@ -75,6 +75,21 @@ impl ApiError {
         }
     }
 
+    /// The machine-readable code, when this error has one. The admin UI uses
+    /// it to place a validation message next to the offending form field.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::Unauthorized { code, .. }
+            | Self::Validation { code, .. }
+            | Self::Conflict { code, .. }
+            | Self::Gone { code, .. } => Some(code),
+            Self::Forbidden { .. }
+            | Self::NotFound { .. }
+            | Self::Database(_)
+            | Self::Internal(_) => None,
+        }
+    }
+
     pub fn into_problem(self, instance: &str) -> ProblemDetails {
         let status = self.status();
         match self {

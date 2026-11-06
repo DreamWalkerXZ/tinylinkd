@@ -13,6 +13,7 @@ pub mod logging;
 pub mod pages;
 pub mod password_resets;
 pub mod problems;
+pub mod ratelimit;
 pub mod redirect;
 pub mod secrets;
 pub mod sessions;

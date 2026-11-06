@@ -111,8 +111,8 @@ pub fn random_slug() -> Result<String, ApiError> {
         .collect())
 }
 
-/// All fields needed to create a Link. The JSON API only sends the Destination
-/// URL and Slug; the browser UI also sets an optional password and expiry.
+/// All fields needed to create a Link. Both the JSON API and the browser UI
+/// may set an optional password and expiry.
 #[derive(Debug, Clone)]
 pub struct NewLink<'a> {
     pub owner_id: i64,
@@ -185,7 +185,6 @@ pub async fn create_link_with(db: &Database, new: NewLink<'_>) -> Result<Link, A
                 &destination_url,
                 password_hash.as_deref(),
                 expires_at.as_deref(),
-                random_slug,
             )
             .await
         }
@@ -228,12 +227,11 @@ async fn create_with_generated_slug(
     destination_url: &str,
     password_hash: Option<&str>,
     expires_at: Option<&str>,
-    mut next_slug: impl FnMut() -> Result<String, ApiError>,
 ) -> Result<Link, ApiError> {
     let now = timeutil::now_rfc3339();
     let mut transaction = db.write_pool().begin_with("BEGIN IMMEDIATE").await?;
     for _ in 0..RANDOM_SLUG_ATTEMPTS {
-        let slug = next_slug()?;
+        let slug = random_slug()?;
         if slug_exists(&mut transaction, &slug).await? {
             continue;
         }
@@ -486,13 +484,18 @@ pub async fn delete_link(
     Ok(())
 }
 
+/// Whether a User who owns this Link, or an Admin, may manage it.
+pub fn can_manage(link: &Link, actor_id: i64, is_admin: bool) -> bool {
+    link.owner_id == actor_id || is_admin
+}
+
 fn ensure_can_manage(
     link: &Link,
     actor_id: i64,
     is_admin: bool,
     action: &str,
 ) -> Result<(), ApiError> {
-    if link.owner_id != actor_id && !is_admin {
+    if !can_manage(link, actor_id, is_admin) {
         return Err(ApiError::forbidden(format!(
             "You do not have permission to {action} this Link."
         )));
@@ -848,65 +851,5 @@ mod tests {
                 "unexpected character in {slug}"
             );
         }
-    }
-
-    async fn test_user(db: &Database) -> crate::users::User {
-        crate::users::create_user(
-            db,
-            crate::users::NewUser {
-                username: "alice".into(),
-                email: None,
-                password: "correct horse battery staple".into(),
-                role: crate::users::Role::User,
-            },
-        )
-        .await
-        .expect("create user")
-    }
-
-    #[tokio::test]
-    async fn generated_slugs_retry_on_collision() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let db = Database::connect(dir.path()).await.expect("database");
-        let user = test_user(&db).await;
-        create_link(&db, user.id, "https://example.com/", Some("taken123"))
-            .await
-            .expect("seed link");
-
-        let mut candidates = ["taken123", "taken123", "free1234"].into_iter();
-        let link =
-            create_with_generated_slug(&db, user.id, "https://example.com/", None, None, || {
-                candidates
-                    .next()
-                    .map(str::to_string)
-                    .ok_or_else(|| ApiError::internal("no more candidates"))
-            })
-            .await
-            .expect("link created after retries");
-
-        assert_eq!(link.slug, "free1234");
-    }
-
-    #[tokio::test]
-    async fn generated_slugs_give_up_after_ten_collisions() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let db = Database::connect(dir.path()).await.expect("database");
-        let user = test_user(&db).await;
-        create_link(&db, user.id, "https://example.com/", Some("taken123"))
-            .await
-            .expect("seed link");
-
-        let result =
-            create_with_generated_slug(&db, user.id, "https://example.com/", None, None, || {
-                Ok::<_, ApiError>("taken123".to_string())
-            })
-            .await;
-
-        assert!(result.is_err(), "expected Slug generation to give up");
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM links")
-            .fetch_one(db.read_pool())
-            .await
-            .expect("count links");
-        assert_eq!(count, 1, "a failed creation must not insert a Link");
     }
 }

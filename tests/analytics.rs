@@ -232,6 +232,66 @@ async fn click_list_supports_time_filters_and_pagination() {
 }
 
 #[tokio::test]
+async fn click_time_filters_compare_instants_across_fractional_seconds() {
+    let context = TestContext::new().await;
+    let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
+    let link_id = create_link(&context, &token, "fractional-clicks").await;
+    let uri = format!("/_/api/v1/links/{link_id}/clicks");
+
+    for (index, clicked_at) in [
+        "2026-01-02T10:00:00.500Z",
+        "2026-01-02T10:00:01.500Z",
+        "2026-01-02T10:00:02Z",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        insert_click(
+            &context,
+            link_id,
+            SeededClick::human(
+                clicked_at,
+                &format!("198.51.100.{}", 40 + index),
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                None,
+                "desktop",
+            ),
+        )
+        .await;
+    }
+
+    // The fractional-second Click is after `from` but sorts before it as text,
+    // and the 1.5-second Click is after `to` but sorts before it as text.
+    let at_whole_second_bounds = context
+        .get(
+            &format!("{uri}?from=2026-01-02T10:00:00Z&to=2026-01-02T10:00:01Z"),
+            Some(&token),
+        )
+        .await
+        .json();
+    assert_eq!(
+        at_whole_second_bounds["total"], 1,
+        "only the Click inside the instants: {at_whole_second_bounds}"
+    );
+    assert_eq!(
+        at_whole_second_bounds["items"][0]["clicked_at"], "2026-01-02T10:00:00.500Z",
+        "bounds are compared as instants, not text: {at_whole_second_bounds}"
+    );
+
+    let at_fractional_bounds = context
+        .get(
+            &format!("{uri}?from=2026-01-02T10:00:00.500Z&to=2026-01-02T10:00:01.500Z"),
+            Some(&token),
+        )
+        .await
+        .json();
+    assert_eq!(
+        at_fractional_bounds["total"], 2,
+        "both fractional-second bounds are inclusive: {at_fractional_bounds}"
+    );
+}
+
+#[tokio::test]
 async fn click_list_is_limited_to_the_owner_and_admins() {
     let context = TestContext::new().await;
     let (_, alice_token) = create_user_with_token(&context, "alice", Role::User).await;

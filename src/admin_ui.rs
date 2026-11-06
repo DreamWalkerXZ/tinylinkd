@@ -11,11 +11,14 @@ use serde::Deserialize;
 
 use crate::analytics::{self, TimeRange};
 use crate::app::AppState;
+use crate::error::ApiError;
 use crate::invites;
 use crate::links;
+use crate::problems::ProblemDetails;
 use crate::redirect::{ClientIp, client_ip};
 use crate::sessions;
 use crate::settings;
+use crate::timeutil;
 use crate::users::{self, Role};
 
 const ADMIN_CSS: &str = include_str!("../templates/admin.css");
@@ -45,6 +48,16 @@ pub fn router() -> Router<AppState> {
 pub struct SessionUser {
     pub session: sessions::Session,
     pub user: users::User,
+}
+
+impl SessionUser {
+    fn id(&self) -> i64 {
+        self.user.id
+    }
+
+    fn is_admin(&self) -> bool {
+        self.user.role == Role::Admin
+    }
 }
 
 pub enum SessionRejection {
@@ -111,7 +124,7 @@ impl FromRequestParts<AppState> for AdminUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let session_user = SessionUser::from_request_parts(parts, state).await?;
-        if session_user.user.role != Role::Admin {
+        if !session_user.is_admin() {
             return Err(SessionRejection::Forbidden);
         }
         Ok(Self(session_user))
@@ -146,6 +159,8 @@ struct LinkRow {
     status: &'static str,
     has_password: bool,
     expires_at: Option<String>,
+    created_at: String,
+    updated_at: String,
     total_clicks: i64,
     human_clicks: i64,
     bot_clicks: i64,
@@ -153,11 +168,15 @@ struct LinkRow {
 }
 
 impl LinkRow {
-    fn new(link: links::Link, short_url: String, owner: String) -> Self {
+    fn new(link: links::Link, short_url: String, owner: String, timezone: chrono_tz::Tz) -> Self {
         let status = match link.status() {
             links::LinkStatus::Active => "active",
             links::LinkStatus::Expired => "expired",
         };
+        let expires_at = link
+            .expires_at
+            .as_deref()
+            .map(|expires_at| timeutil::format_in_timezone(&timezone, expires_at));
         Self {
             id: link.id,
             short_url,
@@ -165,7 +184,9 @@ impl LinkRow {
             destination_url: link.destination_url,
             status,
             has_password: link.has_password,
-            expires_at: link.expires_at,
+            expires_at,
+            created_at: timeutil::format_in_timezone(&timezone, &link.created_at),
+            updated_at: timeutil::format_in_timezone(&timezone, &link.updated_at),
             total_clicks: link.total_clicks,
             human_clicks: link.human_clicks,
             bot_clicks: link.bot_clicks,
@@ -222,7 +243,7 @@ async fn link_list(
             );
         }
     };
-    let is_admin = session_user.user.role == Role::Admin;
+    let is_admin = session_user.is_admin();
     let owner_id = if is_admin { query.owner_id } else { None };
     let status = match query.status.as_deref() {
         Some("active") => Some(links::LinkStatus::Active),
@@ -235,7 +256,7 @@ async fn link_list(
         owner_id: if is_admin {
             owner_id
         } else {
-            Some(session_user.user.id)
+            Some(session_user.id())
         },
         status,
         q: query.q.clone().filter(|q| !q.trim().is_empty()),
@@ -288,7 +309,7 @@ async fn link_list(
                 String::new()
             };
             let short_url = state.config.short_url(&link.slug);
-            LinkRow::new(link, short_url, owner)
+            LinkRow::new(link, short_url, owner, instance_settings.timezone_tz())
         })
         .collect::<Vec<_>>();
     let template = LinkListTemplate {
@@ -354,6 +375,32 @@ impl CreateLinkForm {
     }
 }
 
+/// Validation messages for the Link forms, grouped by the field they belong
+/// to. Anything unrecognized is shown as a general form error.
+#[derive(Debug, Default)]
+struct LinkFormErrors {
+    destination_url: Option<String>,
+    slug: Option<String>,
+    password: Option<String>,
+    expires_at: Option<String>,
+    general: Option<String>,
+}
+
+impl LinkFormErrors {
+    fn from_api_error(error: &ApiError) -> Self {
+        let detail = error.to_string();
+        let mut errors = Self::default();
+        match error.code() {
+            Some("invalid_destination_url") => errors.destination_url = Some(detail),
+            Some("invalid_slug") | Some("slug_taken") => errors.slug = Some(detail),
+            Some("invalid_password") => errors.password = Some(detail),
+            Some("invalid_expires_at") => errors.expires_at = Some(detail),
+            _ => errors.general = Some(detail),
+        }
+        errors
+    }
+}
+
 #[derive(Template)]
 #[template(path = "admin_link_new.html")]
 struct NewLinkTemplate<'a> {
@@ -362,7 +409,7 @@ struct NewLinkTemplate<'a> {
     destination_url: &'a str,
     slug: &'a str,
     expires_at: &'a str,
-    error: Option<&'a str>,
+    errors: LinkFormErrors,
 }
 
 async fn new_link_page(State(state): State<AppState>, session_user: SessionUser) -> Response {
@@ -387,7 +434,7 @@ async fn new_link_page(State(state): State<AppState>, session_user: SessionUser)
         destination_url: "",
         slug: "",
         expires_at: "",
-        error: None,
+        errors: LinkFormErrors::default(),
     };
     render_new_link(&template, StatusCode::OK)
 }
@@ -425,10 +472,21 @@ async fn create_link(
             "The form's CSRF token is missing or invalid.",
         );
     }
+    if let Some(retry_after) = state
+        .link_create_limiter
+        .check_and_record(&session_user.id())
+    {
+        return ProblemDetails::rate_limited(
+            "The Link creation rate limit has been exceeded.",
+            "/_/links",
+            retry_after,
+        )
+        .into_response();
+    }
     let result = links::create_link_with(
         &state.db,
         links::NewLink {
-            owner_id: session_user.user.id,
+            owner_id: session_user.id(),
             destination_url: &form.destination_url,
             slug: form.slug(),
             password: form.password(),
@@ -467,7 +525,6 @@ async fn create_link(
                     );
                 }
             };
-            let message = error.to_string();
             let template = NewLinkTemplate {
                 nav: Nav::new(
                     &instance_settings.instance_name,
@@ -478,7 +535,7 @@ async fn create_link(
                 destination_url: &form.destination_url,
                 slug: form.slug.as_deref().unwrap_or(""),
                 expires_at: form.expires_at.as_deref().unwrap_or(""),
-                error: Some(&message),
+                errors: LinkFormErrors::from_api_error(&error),
             };
             render_new_link(&template, status)
         }
@@ -499,6 +556,15 @@ struct DayRow {
     bot_clicks: i64,
 }
 
+#[derive(Debug, Clone)]
+struct ClickRow {
+    clicked_at: String,
+    ip: String,
+    device: String,
+    user_agent: String,
+    referer: Option<String>,
+}
+
 #[derive(Template)]
 #[template(path = "admin_link_detail.html")]
 struct LinkDetailTemplate<'a> {
@@ -510,6 +576,7 @@ struct LinkDetailTemplate<'a> {
     bot_clicks: i64,
     devices: Vec<DeviceRow>,
     days: Vec<DayRow>,
+    clicks: Vec<ClickRow>,
     timezone: &'a str,
     warning: Option<&'a str>,
     csrf_token: &'a str,
@@ -546,14 +613,14 @@ async fn render_link_detail(
             "The Link does not exist.",
         );
     };
-    let is_admin = session_user.user.role == Role::Admin;
-    if link.owner_id != session_user.user.id && !is_admin {
+    if !links::can_manage(&link, session_user.id(), session_user.is_admin()) {
         return error_page(
             StatusCode::FORBIDDEN,
             "Forbidden",
             "You do not have permission to view this Link.",
         );
     }
+    let is_admin = session_user.is_admin();
     let instance_settings = match settings::load(&state.db).await {
         Ok(settings) => settings,
         Err(error) => {
@@ -595,6 +662,24 @@ async fn render_link_detail(
     } else {
         String::new()
     };
+    let timezone = instance_settings.timezone_tz();
+    let recent_clicks =
+        match analytics::list_clicks(&state.db, link_id, TimeRange::default(), 20, 0).await {
+            Ok((clicks, _)) => clicks
+                .into_iter()
+                .map(|click| ClickRow {
+                    clicked_at: timeutil::format_in_timezone(&timezone, &click.clicked_at),
+                    ip: click.ip,
+                    device: click.device,
+                    user_agent: click.user_agent,
+                    referer: click.referer,
+                })
+                .collect(),
+            Err(error) => {
+                tracing::error!(error = %error, link_id, "failed to read recent Clicks");
+                Vec::new()
+            }
+        };
     let short_url = state.config.short_url(&link.slug);
     let template = LinkDetailTemplate {
         nav: Nav::new(
@@ -602,7 +687,7 @@ async fn render_link_detail(
             &session_user.session,
             &session_user.user,
         ),
-        link: LinkRow::new(link, short_url, owner),
+        link: LinkRow::new(link, short_url, owner, instance_settings.timezone_tz()),
         is_admin,
         total_clicks: stats.total_clicks,
         human_clicks: stats.human_clicks,
@@ -622,6 +707,7 @@ async fn render_link_detail(
                 bot_clicks: day.bot_clicks,
             })
             .collect(),
+        clicks: recent_clicks,
         timezone: &instance_settings.timezone,
         warning,
         csrf_token: &session_user.session.csrf_token,
@@ -691,7 +777,7 @@ struct EditLinkTemplate<'a> {
     has_password: bool,
     is_admin: bool,
     owners: Vec<OwnerOption>,
-    error: Option<&'a str>,
+    errors: LinkFormErrors,
 }
 
 /// The owner selector choices an Admin gets on the Link edit form.
@@ -732,7 +818,7 @@ async fn edit_link_page(
             "The Link does not exist.",
         );
     };
-    if !can_manage(&session_user, &link) {
+    if !links::can_manage(&link, session_user.id(), session_user.is_admin()) {
         return error_page(
             StatusCode::FORBIDDEN,
             "Forbidden",
@@ -750,7 +836,7 @@ async fn edit_link_page(
             );
         }
     };
-    let is_admin = session_user.user.role == Role::Admin;
+    let is_admin = session_user.is_admin();
     let owners = if is_admin {
         match owner_options(&state.db, link.owner_id).await {
             Ok(owners) => owners,
@@ -780,7 +866,7 @@ async fn edit_link_page(
         has_password: link.has_password,
         is_admin,
         owners,
-        error: None,
+        errors: LinkFormErrors::default(),
     };
     render_edit_link(&template, StatusCode::OK)
 }
@@ -836,7 +922,7 @@ async fn update_link(
             "The Link does not exist.",
         );
     };
-    if !can_manage(&session_user, &link) {
+    if !links::can_manage(&link, session_user.id(), session_user.is_admin()) {
         return error_page(
             StatusCode::FORBIDDEN,
             "Forbidden",
@@ -846,8 +932,8 @@ async fn update_link(
     let result = links::update_link(
         &state.db,
         link_id,
-        session_user.user.id,
-        session_user.user.role == Role::Admin,
+        session_user.id(),
+        session_user.is_admin(),
         links::LinkChanges {
             destination_url: Some(form.destination_url.clone()),
             slug: Some(form.slug.trim().to_string()),
@@ -895,8 +981,7 @@ async fn update_link(
                     );
                 }
             };
-            let message = error.to_string();
-            let is_admin = session_user.user.role == Role::Admin;
+            let is_admin = session_user.is_admin();
             let owners = if is_admin {
                 match owner_options(&state.db, form.owner_id.unwrap_or(link.owner_id)).await {
                     Ok(owners) => owners,
@@ -926,16 +1011,11 @@ async fn update_link(
                 has_password: link.has_password,
                 is_admin,
                 owners,
-                error: Some(&message),
+                errors: LinkFormErrors::from_api_error(&error),
             };
             render_edit_link(&template, status)
         }
     }
-}
-
-/// Whether the session User owns this Link or is an Admin.
-fn can_manage(session_user: &SessionUser, link: &links::Link) -> bool {
-    link.owner_id == session_user.user.id || session_user.user.role == Role::Admin
 }
 
 #[derive(Debug, Deserialize)]
@@ -982,7 +1062,7 @@ async fn delete_link(
             "The Link does not exist.",
         );
     };
-    if !can_manage(&session_user, &link) {
+    if !links::can_manage(&link, session_user.id(), session_user.is_admin()) {
         return error_page(
             StatusCode::FORBIDDEN,
             "Forbidden",
@@ -999,8 +1079,8 @@ async fn delete_link(
     if let Err(error) = links::delete_link(
         &state.db,
         link_id,
-        session_user.user.id,
-        session_user.user.role == Role::Admin,
+        session_user.id(),
+        session_user.is_admin(),
     )
     .await
     {
@@ -1115,15 +1195,19 @@ async fn render_users(
         .into_iter()
         .map(|user| {
             let disabled = user.disabled_at.is_some();
+            let timezone = instance_settings.timezone_tz();
             UserRow {
                 id: user.id,
                 username: user.username,
                 email: user.email,
                 role: user.role.as_str(),
                 disabled,
-                disabled_at: user.disabled_at,
-                created_at: user.created_at,
-                updated_at: user.updated_at,
+                disabled_at: user
+                    .disabled_at
+                    .as_deref()
+                    .map(|timestamp| timeutil::format_in_timezone(&timezone, timestamp)),
+                created_at: timeutil::format_in_timezone(&timezone, &user.created_at),
+                updated_at: timeutil::format_in_timezone(&timezone, &user.updated_at),
                 link_count: counts.get(&user.id).copied().unwrap_or(0),
             }
         })
@@ -1375,6 +1459,11 @@ async fn render_invites(
                 std::collections::HashMap::new()
             }
         };
+    let timezone = instance_settings.timezone_tz();
+    let created = created.map(|mut view| {
+        view.expires_at = timeutil::format_in_timezone(&timezone, &view.expires_at);
+        view
+    });
     let rows = found
         .into_iter()
         .map(|invite| {
@@ -1382,10 +1471,16 @@ async fn render_invites(
             InviteRow {
                 id: invite.id,
                 status: invite.status.as_str(),
-                created_at: invite.created_at,
-                expires_at: invite.expires_at,
-                used_at: invite.used_at,
-                revoked_at: invite.revoked_at,
+                created_at: timeutil::format_in_timezone(&timezone, &invite.created_at),
+                expires_at: timeutil::format_in_timezone(&timezone, &invite.expires_at),
+                used_at: invite
+                    .used_at
+                    .as_deref()
+                    .map(|timestamp| timeutil::format_in_timezone(&timezone, timestamp)),
+                revoked_at: invite
+                    .revoked_at
+                    .as_deref()
+                    .map(|timestamp| timeutil::format_in_timezone(&timezone, timestamp)),
                 created_by: created_by
                     .get(&invite.created_by)
                     .cloned()
@@ -1437,7 +1532,7 @@ async fn invite_create(
     if let Some(response) = require_csrf(&session_user.session, &form.csrf_token) {
         return response;
     }
-    match invites::create_invite(&state.db, session_user.user.id).await {
+    match invites::create_invite(&state.db, session_user.id()).await {
         Ok(created) => {
             let view = CreatedInviteView {
                 token: created.plaintext,
@@ -1531,12 +1626,42 @@ impl SettingsFormValues {
     }
 }
 
+/// Validation messages for the Settings form, grouped by field. Anything
+/// unrecognized is shown as a general form error.
+#[derive(Debug, Default)]
+struct SettingsFormErrors {
+    instance_name: Option<String>,
+    timezone: Option<String>,
+    click_retention_days: Option<String>,
+    password_unlock_ttl_seconds: Option<String>,
+    general: Option<String>,
+}
+
+impl SettingsFormErrors {
+    fn from_api_error(error: &ApiError) -> Self {
+        let detail = error.to_string();
+        let mut errors = Self::default();
+        match error.code() {
+            Some("invalid_instance_name") => errors.instance_name = Some(detail),
+            Some("invalid_timezone") => errors.timezone = Some(detail),
+            Some("invalid_click_retention_days") => {
+                errors.click_retention_days = Some(detail);
+            }
+            Some("invalid_password_unlock_ttl") => {
+                errors.password_unlock_ttl_seconds = Some(detail);
+            }
+            _ => errors.general = Some(detail),
+        }
+        errors
+    }
+}
+
 #[derive(Template)]
 #[template(path = "admin_settings.html")]
 struct SettingsTemplate<'a> {
     nav: Nav<'a>,
     values: SettingsFormValues,
-    error: Option<&'a str>,
+    errors: SettingsFormErrors,
     csrf_token: &'a str,
 }
 
@@ -1544,13 +1669,13 @@ fn render_settings_page(
     session_user: &SessionUser,
     instance_name: &str,
     values: SettingsFormValues,
-    error: Option<&str>,
+    errors: SettingsFormErrors,
     status: StatusCode,
 ) -> Response {
     let template = SettingsTemplate {
         nav: Nav::new(instance_name, &session_user.session, &session_user.user),
         values,
-        error,
+        errors,
         csrf_token: &session_user.session.csrf_token,
     };
     match template.render() {
@@ -1570,17 +1695,13 @@ async fn render_settings_error(
     state: &AppState,
     session_user: &SessionUser,
     values: SettingsFormValues,
-    message: String,
+    errors: SettingsFormErrors,
     status: StatusCode,
 ) -> Response {
     match settings::load(&state.db).await {
-        Ok(current) => render_settings_page(
-            session_user,
-            &current.instance_name,
-            values,
-            Some(&message),
-            status,
-        ),
+        Ok(current) => {
+            render_settings_page(session_user, &current.instance_name, values, errors, status)
+        }
         Err(error) => {
             tracing::error!(error = %error, "failed to load Instance settings");
             error_page(
@@ -1603,7 +1724,7 @@ async fn settings_page(
                 &session_user,
                 &current.instance_name,
                 values,
-                None,
+                SettingsFormErrors::default(),
                 StatusCode::OK,
             )
         }
@@ -1655,7 +1776,12 @@ async fn settings_update(
                 &state,
                 &session_user,
                 values,
-                "click_retention_days must be a whole number of days.".to_string(),
+                SettingsFormErrors {
+                    click_retention_days: Some(
+                        "click_retention_days must be a whole number of days.".to_string(),
+                    ),
+                    ..SettingsFormErrors::default()
+                },
                 StatusCode::UNPROCESSABLE_ENTITY,
             )
             .await;
@@ -1668,7 +1794,13 @@ async fn settings_update(
                 &state,
                 &session_user,
                 values,
-                "password_unlock_ttl_seconds must be a whole number of seconds.".to_string(),
+                SettingsFormErrors {
+                    password_unlock_ttl_seconds: Some(
+                        "password_unlock_ttl_seconds must be a whole number of seconds."
+                            .to_string(),
+                    ),
+                    ..SettingsFormErrors::default()
+                },
                 StatusCode::UNPROCESSABLE_ENTITY,
             )
             .await;
@@ -1684,8 +1816,8 @@ async fn settings_update(
         Ok(_) => see_other("/_/settings"),
         Err(error) if error.status().is_client_error() => {
             let status = error.status();
-            let message = error.to_string();
-            render_settings_error(&state, &session_user, values, message, status).await
+            let errors = SettingsFormErrors::from_api_error(&error);
+            render_settings_error(&state, &session_user, values, errors, status).await
         }
         Err(error) => {
             tracing::error!(error = %error, "failed to update Instance settings");

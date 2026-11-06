@@ -108,6 +108,73 @@ fn cookie_header(set_cookie: &str) -> HeaderMap {
 }
 
 #[tokio::test]
+async fn api_link_creation_accepts_an_expiry_like_the_ui_and_normalizes_it_to_utc() {
+    let context = TestContext::new().await;
+    let (_user, token) = create_user_with_token(&context, "alice", Role::User).await;
+
+    let response = context
+        .post(
+            "/_/api/v1/links",
+            Some(&token),
+            json!({
+                "destination_url": "https://example.com/expiring",
+                "slug": "api-expiry",
+                "expires_at": "2030-01-02T05:04:05+02:00",
+            }),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let link = response.json();
+    assert_eq!(link["expires_at"], "2030-01-02T03:04:05Z");
+    assert_eq!(link["status"], "active");
+
+    let redirect = context.get("/api-expiry", None).await;
+    assert_eq!(redirect.status, StatusCode::FOUND);
+    assert_eq!(location(&redirect), Some("https://example.com/expiring"));
+
+    let expired = context
+        .post(
+            "/_/api/v1/links",
+            Some(&token),
+            json!({
+                "destination_url": "https://example.com/gone",
+                "slug": "api-expired",
+                "expires_at": "2020-01-01T00:00:00Z",
+            }),
+        )
+        .await;
+    assert_eq!(
+        expired.status,
+        StatusCode::CREATED,
+        "body: {}",
+        String::from_utf8_lossy(&expired.body)
+    );
+    assert_eq!(expired.json()["status"], "expired");
+    let page = context.get("/api-expired", None).await;
+    assert_eq!(page.status, StatusCode::GONE);
+
+    let invalid = context
+        .post(
+            "/_/api/v1/links",
+            Some(&token),
+            json!({
+                "destination_url": "https://example.com/unknown",
+                "slug": "api-invalid-expiry",
+                "expires_at": "tomorrow",
+            }),
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(invalid.content_type(), "application/problem+json");
+    assert_eq!(invalid.json()["code"], "invalid_expires_at");
+}
+
+#[tokio::test]
 async fn owner_sets_extends_and_clears_the_link_expiry() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
