@@ -31,3 +31,23 @@ pub fn local_date(timezone: &Tz, timestamp: OffsetDateTime) -> Option<String> {
     let utc = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp.unix_timestamp(), 0)?;
     Some(utc.with_timezone(timezone).date_naive().to_string())
 }
+
+/// Format a stored RFC 3339 instant for display in an IANA timezone.
+///
+/// The result is `YYYY-MM-DD HH:MM:SS <IANA name>`, using the timezone's
+/// offset at that instant so daylight-saving transitions are respected.
+/// Unparseable values are returned unchanged rather than hidden.
+pub fn format_in_timezone(timezone: &Tz, value: &str) -> String {
+    let Ok(parsed) = parse_rfc3339(value) else {
+        return value.to_string();
+    };
+    let Some(instant) = chrono::DateTime::<chrono::Utc>::from_timestamp(parsed.unix_timestamp(), 0)
+    else {
+        return value.to_string();
+    };
+    format!(
+        "{} {}",
+        instant.with_timezone(timezone).format("%Y-%m-%d %H:%M:%S"),
+        timezone.name()
+    )
+}

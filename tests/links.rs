@@ -87,6 +87,58 @@ async fn create_link(context: &TestContext, token: &str, body: Value) -> Value {
 }
 
 #[tokio::test]
+async fn creating_links_through_the_api_is_rate_limited_per_user() {
+    let context = TestContext::new().await;
+    let (_user, token) = create_user_with_token(&context, "alice", Role::User).await;
+
+    for index in 0..30 {
+        let response = context
+            .post(
+                "/_/api/v1/links",
+                Some(&token),
+                json!({
+                    "destination_url": "https://example.com/target",
+                    "slug": format!("rate-{index}"),
+                }),
+            )
+            .await;
+        assert_eq!(
+            response.status,
+            StatusCode::CREATED,
+            "request {index}: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    let limited = context
+        .post(
+            "/_/api/v1/links",
+            Some(&token),
+            json!({
+                "destination_url": "https://example.com/target",
+                "slug": "rate-overflow",
+            }),
+        )
+        .await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.content_type(), "application/problem+json");
+    let retry_after = limited
+        .headers
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .expect("Retry-After header");
+    let seconds: u64 = retry_after.parse().expect("Retry-After in seconds");
+    assert!(
+        (1..=60).contains(&seconds),
+        "unexpected Retry-After: {retry_after}"
+    );
+    let problem = limited.json();
+    assert_eq!(problem["status"], 429);
+    assert_eq!(problem["code"], "rate_limited");
+    assert_eq!(problem["instance"], "/_/api/v1/links");
+}
+
+#[tokio::test]
 async fn user_creates_a_link_with_a_custom_slug() {
     let context = TestContext::new().await;
     let (alice, token) = create_user_with_token(&context, "alice", Role::User).await;

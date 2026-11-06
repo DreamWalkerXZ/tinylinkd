@@ -36,6 +36,7 @@ async fn openapi_document_covers_auth_and_token_routes() {
         "/_/api/v1/invites/{token}",
         "/_/api/v1/invites/{token}/accept",
         "/_/api/v1/users/{id}/password-reset",
+        "/_/api/v1/password-resets/{id}",
         "/_/api/v1/password-resets/{token}",
         "/_/api/v1/password-resets/{token}/accept",
     ] {
@@ -151,6 +152,7 @@ async fn openapi_document_covers_auth_and_token_routes() {
     assert!(document["paths"]["/_/api/v1/invites/{token}"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/invites/{token}/accept"]["post"].is_object());
     assert!(document["paths"]["/_/api/v1/users/{id}/password-reset"]["post"].is_object());
+    assert!(document["paths"]["/_/api/v1/password-resets/{id}"]["delete"].is_object());
     assert!(document["paths"]["/_/api/v1/password-resets/{token}"]["get"].is_object());
     assert!(document["paths"]["/_/api/v1/password-resets/{token}/accept"]["post"].is_object());
     assert_eq!(

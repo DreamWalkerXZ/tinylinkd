@@ -33,10 +33,12 @@ not supported. Run the latest published binary or container image.
   hashing or truncation. Retention defaults to 90 days and is configurable with
   the `click_retention_days` Instance setting. Consider your privacy
   obligations before deploying.
-- **Credentials at rest**: passwords are hashed with Argon2id. API tokens,
-  Invite tokens, password-reset tokens, and session tokens are stored only as
-  SHA-256 hashes. The HMAC key used to sign password-unlock cookies lives in
-  the `secrets` table.
+- **Credentials at rest**: passwords are hashed with Argon2id. API tokens are
+  stored as a SHA-256 hash plus a 12-character display prefix, which is shown
+  in the token list; the prefix alone cannot authenticate. Invite tokens,
+  password-reset tokens, and session tokens are stored only as SHA-256 hashes.
+  The HMAC key used to sign password-unlock cookies lives in the `secrets`
+  table.
 - **Backups**: `tld backup` snapshots the whole database, including raw IPs,
   password hashes, token hashes, and the HMAC signing key. Protect backups as
   you would the live database.
@@ -49,5 +51,7 @@ not supported. Run the latest published binary or container image.
 - **Container**: the official image is distroless and runs as the non-root
   `nonroot` user (UID 65532). Mount `/data` with ownership that lets that UID
   write.
-- **Rate limits**: login, password unlock, Link creation, and API requests are
-  rate-limited in process. The buckets are per-process and reset on restart.
+- **Rate limits**: login (per client IP), password unlock (per client IP and
+  Link), Link creation (per User), and API requests (per API token) are
+  rate-limited in process. A limit breach returns `429 Too Many Requests` with
+  `Retry-After`. The buckets are per-process and reset on restart.

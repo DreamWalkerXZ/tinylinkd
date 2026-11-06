@@ -7,6 +7,29 @@ use tinylinkd::users::{self, NewUser, Role, User};
 
 const PASSWORD: &str = "correct horse battery staple";
 
+/// The display form of an RFC 3339 timestamp in the default UTC timezone.
+fn utc_display(timestamp: &str) -> String {
+    let parsed =
+        time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+            .expect("RFC 3339 timestamp");
+    let format =
+        time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second] UTC")
+            .expect("format description");
+    parsed.format(&format).expect("formatted timestamp")
+}
+
+/// The inline error element rendered beneath a named form field. Panics when
+/// the page has no element with that id, so a misplaced error fails the test.
+fn field_error(page: &str, field: &str) -> String {
+    let marker = format!("id=\"{}_error\"", field);
+    let start = page
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no inline error for {field}; body: {page}"));
+    let rest = &page[start..];
+    let end = rest.find("</p>").expect("the inline error is a paragraph");
+    rest[..end].to_string()
+}
+
 /// Every `Set-Cookie` header value on a response.
 fn set_cookies(response: &TestResponse) -> Vec<String> {
     response
@@ -234,6 +257,150 @@ async fn create_link_on_db(
         .expect("create Link")
 }
 
+async fn set_instance_timezone(context: &TestContext, admin: &User, timezone: &str) {
+    let token = tinylinkd::tokens::create_token(&context.db, admin.id, "settings", None)
+        .await
+        .expect("admin token");
+    let response = context
+        .request(
+            Method::PATCH,
+            "/_/api/v1/settings",
+            Some(&token.plaintext),
+            Some(serde_json::json!({"timezone": timezone})),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+}
+
+#[tokio::test]
+async fn link_and_click_times_are_shown_in_the_instance_timezone() {
+    let context = TestContext::new().await;
+    let admin = create_user(&context, "root", Role::Admin).await;
+    set_instance_timezone(&context, &admin, "Europe/Berlin").await;
+    let link = create_link_on_db(&context, &admin, "timed-link", "https://example.com/timed").await;
+    sqlx::query("UPDATE links SET created_at = ?, updated_at = ?, expires_at = ? WHERE id = ?")
+        .bind("2030-01-02T03:04:05Z")
+        .bind("2030-01-03T04:05:06Z")
+        .bind("2030-02-02T03:04:05Z")
+        .bind(link.id)
+        .execute(context.db.write_pool())
+        .await
+        .expect("update Link times");
+    sqlx::query(
+        "INSERT INTO clicks (link_id, clicked_at, ip, user_agent, referer, device, is_bot, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(link.id)
+    .bind("2030-01-02T03:04:05.500Z")
+    .bind("203.0.113.9")
+    .bind("Mozilla/5.0 (X11; Linux x86_64) Firefox/120.0")
+    .bind("https://referrer.example/path")
+    .bind("desktop")
+    .bind(0)
+    .bind("2030-01-02T03:04:05Z")
+    .execute(context.db.write_pool())
+    .await
+    .expect("insert Click");
+
+    let (session_cookie, _) = login(&context, "root", PASSWORD).await;
+    let detail = get_with_cookies(
+        &context,
+        &format!("/_/links/{}", link.id),
+        std::slice::from_ref(&session_cookie),
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&detail.body);
+    assert!(
+        html.contains("2030-01-02 04:04:05 Europe/Berlin"),
+        "Link creation and Click times must use the Instance timezone: {html}"
+    );
+    assert!(
+        html.contains("2030-01-03 05:05:06 Europe/Berlin"),
+        "Link update time must use the Instance timezone: {html}"
+    );
+    assert!(
+        html.contains("2030-02-02 04:04:05 Europe/Berlin"),
+        "Link expiry must use the Instance timezone: {html}"
+    );
+    assert!(html.contains("203.0.113.9"), "missing Click IP: {html}");
+    assert!(
+        html.contains("Firefox/120.0"),
+        "missing Click User-Agent: {html}"
+    );
+    assert!(
+        html.contains("https://referrer.example/path"),
+        "missing Click referrer: {html}"
+    );
+    assert!(
+        !html.contains("2030-01-02T03:04:05Z"),
+        "raw UTC timestamps must not be displayed: {html}"
+    );
+
+    let list = get_with_cookies(&context, "/_/links", &[session_cookie]).await;
+    assert_eq!(list.status, StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&list.body).contains("2030-02-02 04:04:05 Europe/Berlin"),
+        "the Link list expiry must use the Instance timezone"
+    );
+}
+
+#[tokio::test]
+async fn user_and_invite_times_are_shown_in_the_instance_timezone() {
+    let context = TestContext::new().await;
+    let admin = create_user(&context, "root", Role::Admin).await;
+    let alice = create_user(&context, "alice", Role::User).await;
+    set_instance_timezone(&context, &admin, "America/New_York").await;
+    sqlx::query("UPDATE users SET created_at = ?, updated_at = ? WHERE id = ?")
+        .bind("2030-01-02T03:04:05Z")
+        .bind("2030-01-02T04:04:05Z")
+        .bind(alice.id)
+        .execute(context.db.write_pool())
+        .await
+        .expect("update User times");
+    let invite = tinylinkd::invites::create_invite(&context.db, admin.id)
+        .await
+        .expect("create Invite");
+    sqlx::query("UPDATE invites SET created_at = ?, expires_at = ? WHERE id = ?")
+        .bind("2030-01-02T03:04:05Z")
+        .bind("2030-01-09T03:04:05Z")
+        .bind(invite.id)
+        .execute(context.db.write_pool())
+        .await
+        .expect("update Invite times");
+
+    let (session_cookie, _) = login(&context, "root", PASSWORD).await;
+    let users_page =
+        get_with_cookies(&context, "/_/users", std::slice::from_ref(&session_cookie)).await;
+    assert_eq!(users_page.status, StatusCode::OK);
+    let users_html = String::from_utf8_lossy(&users_page.body);
+    assert!(
+        users_html.contains("2030-01-01 22:04:05 America/New_York"),
+        "User creation time must use the Instance timezone: {users_html}"
+    );
+    assert!(
+        users_html.contains("2030-01-01 23:04:05 America/New_York"),
+        "User update time must use the Instance timezone: {users_html}"
+    );
+
+    let invites_page = get_with_cookies(&context, "/_/invites", &[session_cookie]).await;
+    assert_eq!(invites_page.status, StatusCode::OK);
+    let invites_html = String::from_utf8_lossy(&invites_page.body);
+    assert!(
+        invites_html.contains("2030-01-01 22:04:05 America/New_York"),
+        "Invite creation time must use the Instance timezone: {invites_html}"
+    );
+    assert!(
+        invites_html.contains("2030-01-08 22:04:05 America/New_York"),
+        "Invite expiry must use the Instance timezone: {invites_html}"
+    );
+}
+
 #[tokio::test]
 async fn the_link_detail_page_shows_summary_and_statistics() {
     let context = TestContext::new().await;
@@ -409,7 +576,7 @@ async fn edit_validation_errors_render_inline_and_preserve_values() {
     let response = post_form(
         &context,
         &format!("/_/links/{}", link.id),
-        &[session],
+        std::slice::from_ref(&session),
         &[
             ("csrf_token", &csrf_token),
             ("destination_url", "https://example.com/new"),
@@ -421,7 +588,7 @@ async fn edit_validation_errors_render_inline_and_preserve_values() {
     assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
     let body = String::from_utf8_lossy(&response.body);
     assert!(
-        body.contains("Slug must be 3-64 characters"),
+        field_error(&body, "slug").contains("Slug must be 3-64 characters"),
         "body: {body}"
     );
     assert!(body.contains("value=\"NO\""), "body: {body}");
@@ -435,6 +602,27 @@ async fn edit_validation_errors_render_inline_and_preserve_values() {
         .expect("read Link")
         .expect("Link exists");
     assert_eq!(unchanged.slug, "edit-link");
+
+    let response = post_form(
+        &context,
+        &format!("/_/links/{}", link.id),
+        &[session],
+        &[
+            ("csrf_token", &csrf_token),
+            ("destination_url", "https://example.com/new"),
+            ("slug", "edit-link"),
+            ("expires_at", "not-a-time"),
+        ],
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(
+        field_error(&body, "expires_at").contains("must be an RFC 3339 timestamp"),
+        "body: {body}"
+    );
+    assert!(body.contains("value=\"not-a-time\""), "body: {body}");
 }
 
 #[tokio::test]
@@ -663,7 +851,7 @@ async fn creating_a_link_from_the_ui_uses_the_shared_service() {
     let body = String::from_utf8_lossy(&list.body);
     assert!(body.contains("ui-link"), "body: {body}");
     assert!(body.contains("https://example.com/target"), "body: {body}");
-    assert!(body.contains("2030-01-02T03:04:05Z"), "body: {body}");
+    assert!(body.contains("2030-01-02 03:04:05 UTC"), "body: {body}");
 }
 
 #[tokio::test]
@@ -676,7 +864,7 @@ async fn create_validation_errors_render_inline_and_preserve_values() {
     let response = post_form(
         &context,
         "/_/links",
-        &[session],
+        std::slice::from_ref(&session),
         &[
             ("csrf_token", &csrf_token),
             ("destination_url", "not a url"),
@@ -694,11 +882,33 @@ async fn create_validation_errors_render_inline_and_preserve_values() {
     );
     let body = String::from_utf8_lossy(&response.body);
     assert!(
-        body.contains("Destination URL must be an absolute http or https URL"),
+        field_error(&body, "destination_url")
+            .contains("Destination URL must be an absolute http or https URL"),
         "body: {body}"
     );
     assert!(body.contains("value=\"not a url\""), "body: {body}");
     assert!(body.contains("value=\"BAD SLUG\""), "body: {body}");
+
+    let response = post_form(
+        &context,
+        "/_/links",
+        &[session],
+        &[
+            ("csrf_token", &csrf_token),
+            ("destination_url", "https://example.com/valid"),
+            ("slug", ""),
+            ("expires_at", "not-a-time"),
+        ],
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(
+        field_error(&body, "expires_at").contains("must be an RFC 3339 timestamp"),
+        "body: {body}"
+    );
+    assert!(body.contains("value=\"not-a-time\""), "body: {body}");
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM links")
         .fetch_one(context.db.read_pool())
@@ -729,7 +939,10 @@ async fn a_taken_slug_is_reported_on_the_create_form() {
 
     assert_eq!(response.status, StatusCode::CONFLICT);
     let body = String::from_utf8_lossy(&response.body);
-    assert!(body.contains("Slug is already taken"), "body: {body}");
+    assert!(
+        field_error(&body, "slug").contains("Slug is already taken"),
+        "body: {body}"
+    );
     assert!(body.contains("value=\"taken-slug\""), "body: {body}");
 }
 
@@ -753,6 +966,61 @@ async fn a_failed_login_reports_an_error_without_a_session() {
         .await
         .expect("count sessions");
     assert_eq!(sessions, 0);
+}
+
+#[tokio::test]
+async fn creating_links_from_the_ui_is_rate_limited_per_user() {
+    let context = TestContext::new().await;
+    create_user(&context, "alice", Role::User).await;
+    let (session_cookie, response) = login(&context, "alice", PASSWORD).await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER);
+    let csrf_token = session_csrf_for(&context, &session_cookie).await;
+
+    for index in 0..30 {
+        let slug = format!("ui-rate-{index}");
+        let response = post_form(
+            &context,
+            "/_/links",
+            std::slice::from_ref(&session_cookie),
+            &[
+                ("csrf_token", &csrf_token),
+                ("destination_url", "https://example.com/target"),
+                ("slug", &slug),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::SEE_OTHER,
+            "request {index}: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    let limited = post_form(
+        &context,
+        "/_/links",
+        &[session_cookie],
+        &[
+            ("csrf_token", &csrf_token),
+            ("destination_url", "https://example.com/target"),
+            ("slug", "ui-rate-overflow"),
+        ],
+    )
+    .await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.content_type(), "application/problem+json");
+    let retry_after = limited
+        .headers
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .expect("Retry-After header");
+    let seconds: u64 = retry_after.parse().expect("Retry-After in seconds");
+    assert!(
+        (1..=60).contains(&seconds),
+        "unexpected Retry-After: {retry_after}"
+    );
+    assert_eq!(limited.json()["code"], "rate_limited");
 }
 
 #[tokio::test]
@@ -1329,14 +1597,17 @@ async fn the_users_page_lists_roles_disabled_status_and_timestamps() {
     assert!(body.contains(">admin<"), "role is shown: {body}");
     assert!(body.contains("disabled"), "boundary status: {body}");
     assert!(
-        body.contains("2026-01-02T03:04:05Z"),
+        body.contains("2026-01-02 03:04:05 UTC"),
         "disabled timestamp: {body}"
     );
     assert!(
-        body.contains(&alice.created_at),
+        body.contains(&utc_display(&alice.created_at)),
         "created timestamp: {body}"
     );
-    assert!(body.contains(&root.created_at), "created timestamp: {body}");
+    assert!(
+        body.contains(&utc_display(&root.created_at)),
+        "created timestamp: {body}"
+    );
     assert!(body.contains("name=\"csrf_token\""), "CSRF field: {body}");
 }
 
@@ -1618,7 +1889,10 @@ async fn an_admin_creates_an_invite_and_sees_the_token_once() {
             .expect("the stored Invite");
     assert_eq!(stored_hash, tinylinkd::auth::sha256_hex(token.as_bytes()));
     assert_ne!(stored_hash, token, "only the token hash is stored");
-    assert!(body.contains(&expires_at), "expiry shown: {body}");
+    assert!(
+        body.contains(&utc_display(&expires_at)),
+        "expiry shown: {body}"
+    );
 
     let list = get_with_cookies(&context, "/_/invites", &[admin_session]).await;
     assert_eq!(list.status, StatusCode::OK);
@@ -1684,7 +1958,10 @@ async fn the_invites_page_lists_every_status_without_tokens() {
         );
     }
     assert!(body.contains("root"), "the creating Admin: {body}");
-    assert!(body.contains(&pending.expires_at), "expiry: {body}");
+    assert!(
+        body.contains(&utc_display(&pending.expires_at)),
+        "expiry: {body}"
+    );
     for secret in [&pending.plaintext, &revoked.plaintext, &used.plaintext] {
         assert!(
             !body.contains(secret),
@@ -1919,7 +2196,10 @@ async fn settings_validation_errors_render_inline_and_preserve_values() {
         String::from_utf8_lossy(&response.body)
     );
     let body = String::from_utf8_lossy(&response.body);
-    assert!(body.contains("valid IANA timezone name"), "body: {body}");
+    assert!(
+        field_error(&body, "timezone").contains("valid IANA timezone name"),
+        "body: {body}"
+    );
     assert!(body.contains("value=\"Not/AZone\""), "body: {body}");
     assert!(body.contains("value=\"Renamed\""), "body: {body}");
     let unchanged = tinylinkd::settings::load(&context.db)
@@ -1944,7 +2224,10 @@ async fn settings_validation_errors_render_inline_and_preserve_values() {
     .await;
     assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
     let body = String::from_utf8_lossy(&response.body);
-    assert!(body.contains("whole number"), "body: {body}");
+    assert!(
+        field_error(&body, "click_retention_days").contains("whole number"),
+        "body: {body}"
+    );
     assert!(body.contains("value=\"abc\""), "body: {body}");
 
     let zero_days = [
@@ -1962,10 +2245,10 @@ async fn settings_validation_errors_render_inline_and_preserve_values() {
     )
     .await;
     assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body = String::from_utf8_lossy(&response.body);
     assert!(
-        String::from_utf8_lossy(&response.body).contains("positive number of days"),
-        "body: {}",
-        String::from_utf8_lossy(&response.body)
+        field_error(&body, "click_retention_days").contains("positive number of days"),
+        "body: {body}"
     );
 
     let bad_ttl = [
@@ -1983,10 +2266,10 @@ async fn settings_validation_errors_render_inline_and_preserve_values() {
     )
     .await;
     assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body = String::from_utf8_lossy(&response.body);
     assert!(
-        String::from_utf8_lossy(&response.body).contains("positive number of seconds"),
-        "body: {}",
-        String::from_utf8_lossy(&response.body)
+        field_error(&body, "password_unlock_ttl_seconds").contains("positive number of seconds"),
+        "body: {body}"
     );
 
     let empty_name = [
@@ -1998,10 +2281,10 @@ async fn settings_validation_errors_render_inline_and_preserve_values() {
     ];
     let response = post_form(&context, "/_/settings", &[admin_session], &empty_name).await;
     assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body = String::from_utf8_lossy(&response.body);
     assert!(
-        String::from_utf8_lossy(&response.body).contains("must not be empty"),
-        "body: {}",
-        String::from_utf8_lossy(&response.body)
+        field_error(&body, "instance_name").contains("must not be empty"),
+        "body: {body}"
     );
 }
 

@@ -12,6 +12,7 @@ struct NotFoundTemplate<'a> {
 #[template(path = "password_form.html")]
 struct PasswordFormTemplate<'a> {
     slug: &'a str,
+    query: Option<&'a str>,
     error: Option<&'a str>,
 }
 
@@ -45,8 +46,15 @@ pub fn expired(slug: &str) -> Response {
 
 /// Render the public password form. Callers choose the status: 200 for the
 /// initial form, 401 after a wrong password, or 429 when rate-limited.
-pub fn password_form(status: StatusCode, slug: &str, error: Option<&str>) -> Response {
-    match (PasswordFormTemplate { slug, error }).render() {
+/// Render the public password form. The query string of the short URL is
+/// carried into the form action so it survives the unlock round trip.
+pub fn password_form(
+    status: StatusCode,
+    slug: &str,
+    query: Option<&str>,
+    error: Option<&str>,
+) -> Response {
+    match (PasswordFormTemplate { slug, query, error }).render() {
         Ok(html) => html_response(status, html),
         Err(error) => {
             tracing::error!(error = %error, "failed to render the password form");

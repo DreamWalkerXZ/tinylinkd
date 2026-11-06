@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Edit Link</h1>
 
-{% match error %}
+{% match errors.general %}
 {% when Some with (message) %}
 <p class="error" role="alert">{{ message }}</p>
 {% when None %}
@@ -14,10 +14,20 @@
 
   <label for="destination_url">Destination URL</label>
   <input id="destination_url" name="destination_url" type="text" value="{{ destination_url }}" required autofocus>
+  {% match errors.destination_url %}
+  {% when Some with (message) %}
+  <p class="error" id="destination_url_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
   <p class="muted">An absolute http or https URL.</p>
 
   <label for="slug">Slug</label>
   <input id="slug" name="slug" type="text" value="{{ slug }}" required>
+  {% match errors.slug %}
+  {% when Some with (message) %}
+  <p class="error" id="slug_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
   <p class="muted">Changing the Slug stops the old short URL immediately; another Link may claim it.</p>
 
   {% if is_admin %}
@@ -38,6 +48,11 @@
     <p class="muted">{% if has_password %}This Link is currently protected.{% else %}This Link is not protected.{% endif %} Leave the field blank to keep the current setting.</p>
     <label for="password">New password</label>
     <input id="password" name="password" type="password" autocomplete="new-password">
+    {% match errors.password %}
+    {% when Some with (message) %}
+    <p class="error" id="password_error" role="alert">{{ message }}</p>
+    {% when None %}
+    {% endmatch %}
     {% if has_password %}
     <p><label><input type="checkbox" name="remove_password" value="1"> Remove the password</label></p>
     {% endif %}
@@ -48,6 +63,11 @@
     <p class="muted">An RFC 3339 UTC timestamp. Leave the field unchanged to keep the current expiry.</p>
     <label for="expires_at">Expires at</label>
     <input id="expires_at" name="expires_at" type="text" value="{{ expires_at }}" placeholder="2030-01-02T03:04:05Z">
+    {% match errors.expires_at %}
+    {% when Some with (message) %}
+    <p class="error" id="expires_at_error" role="alert">{{ message }}</p>
+    {% when None %}
+    {% endmatch %}
     {% if !expires_at.is_empty() %}
     <p><label><input type="checkbox" name="remove_expiry" value="1"> Remove the expiry</label></p>
     {% endif %}

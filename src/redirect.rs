@@ -70,7 +70,7 @@ async fn respond(
     }
 
     if link.has_password && !is_unlocked(&state, &link, &headers).await {
-        return pages::password_form(StatusCode::OK, &slug, None);
+        return pages::password_form(StatusCode::OK, &slug, query, None);
     }
 
     redirect_to_destination(&state, &link, query, &headers, client.0, record_click).await
@@ -154,10 +154,12 @@ struct PasswordForm {
 async fn unlock(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    uri: Uri,
     headers: HeaderMap,
     client: ClientIp,
     form: Result<Form<PasswordForm>, FormRejection>,
 ) -> Response {
+    let query = uri.query();
     let link = match links::find_by_slug(&state.db, &slug).await {
         Ok(Some(link)) => link,
         Ok(None) => return pages::not_found(&slug),
@@ -184,6 +186,7 @@ async fn unlock(
         let mut response = pages::password_form(
             StatusCode::TOO_MANY_REQUESTS,
             &slug,
+            query,
             Some("Too many failed attempts. Try again later."),
         );
         response.headers_mut().insert(
@@ -199,6 +202,7 @@ async fn unlock(
         return pages::password_form(
             StatusCode::UNAUTHORIZED,
             &slug,
+            query,
             Some("Enter the Link password."),
         );
     };
@@ -206,7 +210,7 @@ async fn unlock(
     let password_hash = match links::find_password_hash(&state.db, link.id).await {
         Ok(Some(password_hash)) => password_hash,
         // The password was cleared between the lookup and verification.
-        Ok(None) => return redirect_to_short_url(&slug),
+        Ok(None) => return redirect_to_short_url(&slug, query),
         Err(error) => {
             tracing::error!(
                 error = %error,
@@ -222,6 +226,7 @@ async fn unlock(
         return pages::password_form(
             StatusCode::UNAUTHORIZED,
             &slug,
+            query,
             Some("Incorrect password. Please try again."),
         );
     }
@@ -254,7 +259,8 @@ async fn unlock(
     let mut response = StatusCode::SEE_OTHER.into_response();
     response.headers_mut().insert(
         header::LOCATION,
-        HeaderValue::from_str(&format!("/{slug}")).expect("a Slug is a valid Location"),
+        HeaderValue::from_str(&short_url(&slug, query))
+            .expect("a Slug and query are a valid Location"),
     );
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -263,13 +269,23 @@ async fn unlock(
     response
 }
 
-fn redirect_to_short_url(slug: &str) -> Response {
+fn redirect_to_short_url(slug: &str, query: Option<&str>) -> Response {
     let mut response = StatusCode::SEE_OTHER.into_response();
     response.headers_mut().insert(
         header::LOCATION,
-        HeaderValue::from_str(&format!("/{slug}")).expect("a Slug is a valid Location"),
+        HeaderValue::from_str(&short_url(slug, query))
+            .expect("a Slug and query are a valid Location"),
     );
     response
+}
+
+/// The short URL to continue to after an unlock, carrying the original query
+/// string so it reaches the Destination URL.
+fn short_url(slug: &str, query: Option<&str>) -> String {
+    match query.filter(|query| !query.is_empty()) {
+        Some(query) => format!("/{slug}?{query}"),
+        None => format!("/{slug}"),
+    }
 }
 
 fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<String> {

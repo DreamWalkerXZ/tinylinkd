@@ -1,6 +1,4 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::http::HeaderMap;
 use axum::http::header;
@@ -9,6 +7,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use time::OffsetDateTime;
+
+use crate::ratelimit::RateLimiter;
 
 /// The default lifetime of a password unlock. The Instance's
 /// `password_unlock_ttl_seconds` setting takes precedence; this remains the
@@ -144,64 +144,33 @@ pub fn cookie_from_headers(headers: &HeaderMap, link_id: i64) -> Option<String> 
 ///
 /// A single-instance deployment needs no external store; the state is bounded
 /// by pruning expired failures whenever a new one is recorded.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PasswordAttemptLimiter {
-    failures: Mutex<HashMap<(String, i64), VecDeque<Instant>>>,
+    failures: RateLimiter<(String, i64)>,
 }
 
 impl PasswordAttemptLimiter {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, HashMap<(String, i64), VecDeque<Instant>>> {
-        self.failures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        Self {
+            failures: RateLimiter::new(PASSWORD_FAILURE_LIMIT, PASSWORD_FAILURE_WINDOW),
+        }
     }
 
     /// When the Link is rate-limited for this IP, returns the number of
     /// seconds the caller should advertise in `Retry-After`.
     pub fn check(&self, ip: &str, link_id: i64) -> Option<u64> {
-        let key = (ip.to_string(), link_id);
-        let now = Instant::now();
-        let mut failures = self.lock();
-        let entry = failures.get_mut(&key)?;
-        while entry
-            .front()
-            .is_some_and(|oldest| now.duration_since(*oldest) >= PASSWORD_FAILURE_WINDOW)
-        {
-            entry.pop_front();
-        }
-        if entry.len() < PASSWORD_FAILURE_LIMIT {
-            return None;
-        }
-        let oldest = *entry.front().expect("a limited entry has failures");
-        Some(
-            PASSWORD_FAILURE_WINDOW
-                .saturating_sub(now.duration_since(oldest))
-                .as_secs()
-                .max(1),
-        )
+        self.failures.check(&(ip.to_string(), link_id))
     }
 
     /// Record a failed password attempt.
     pub fn record_failure(&self, ip: &str, link_id: i64) {
-        let now = Instant::now();
-        let mut failures = self.lock();
-        failures.retain(|_, times| {
-            while times
-                .front()
-                .is_some_and(|oldest| now.duration_since(*oldest) >= PASSWORD_FAILURE_WINDOW)
-            {
-                times.pop_front();
-            }
-            !times.is_empty()
-        });
-        failures
-            .entry((ip.to_string(), link_id))
-            .or_default()
-            .push_back(now);
+        self.failures.record(&(ip.to_string(), link_id));
+    }
+}
+
+impl Default for PasswordAttemptLimiter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -134,7 +134,54 @@ pub async fn validate_password_reset(
     Ok(PasswordResetValidation { status, expires_at })
 }
 
-/// Set a new password from a valid password-reset token and consume the token.
+/// Revoke a password-reset token so it can no longer be validated or used.
+///
+/// Used tokens cannot be revoked. Revoking an already revoked token is a
+/// no-op, mirroring Invite revocation.
+pub async fn revoke_password_reset(db: &Database, reset_id: i64) -> Result<(), ApiError> {
+    let mut transaction = db.write_pool().begin_with("BEGIN IMMEDIATE").await?;
+    let row = sqlx::query("SELECT used_at, revoked_at FROM password_resets WHERE id = ?")
+        .bind(reset_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let Some(row) = row else {
+        transaction.rollback().await?;
+        return Err(ApiError::not_found("Password-reset token not found."));
+    };
+    let used_at: Option<String> = row.try_get("used_at")?;
+    let revoked_at: Option<String> = row.try_get("revoked_at")?;
+    if used_at.is_some() {
+        transaction.rollback().await?;
+        return Err(ApiError::conflict(
+            "password_reset_used",
+            "The password-reset token has already been used.",
+        ));
+    }
+    if revoked_at.is_some() {
+        transaction.commit().await?;
+        return Ok(());
+    }
+
+    let revoked = sqlx::query(
+        "UPDATE password_resets SET revoked_at = ?
+         WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL",
+    )
+    .bind(timeutil::now_rfc3339())
+    .bind(reset_id)
+    .execute(&mut *transaction)
+    .await?;
+    if revoked.rows_affected() == 0 {
+        transaction.rollback().await?;
+        return Err(ApiError::conflict(
+            "password_reset_unavailable",
+            "The password-reset token can no longer be revoked.",
+        ));
+    }
+
+    transaction.commit().await?;
+    Ok(())
+}
+
 ///
 /// The password is hashed before the write transaction starts. The token is
 /// claimed with a single conditional `UPDATE`, so a concurrent acceptance can

@@ -7,6 +7,74 @@ use tinylinkd::bootstrap::{BootstrapAdmin, bootstrap_admin};
 use tinylinkd::tokens::create_token;
 
 #[tokio::test]
+async fn api_requests_are_rate_limited_per_token() {
+    let context = TestContext::new().await;
+    let admin = bootstrap_test_admin(&context).await;
+    let token = create_token(&context.db, admin.id, "rate limited", None)
+        .await
+        .expect("token");
+
+    for index in 0..120 {
+        let response = context.get("/_/api/v1/me", Some(&token.plaintext)).await;
+        assert_eq!(response.status, StatusCode::OK, "request {index}");
+    }
+
+    let limited = context.get("/_/api/v1/me", Some(&token.plaintext)).await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.content_type(), "application/problem+json");
+    let retry_after = limited
+        .headers
+        .get(axum::http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .expect("Retry-After header");
+    let seconds: u64 = retry_after.parse().expect("Retry-After in seconds");
+    assert!(
+        (1..=60).contains(&seconds),
+        "unexpected Retry-After: {retry_after}"
+    );
+    let problem = limited.json();
+    assert_eq!(problem["status"], 429);
+    assert_eq!(problem["code"], "rate_limited");
+    assert_eq!(problem["instance"], "/_/api/v1/me");
+
+    let unaffected = create_token(&context.db, admin.id, "fresh", None)
+        .await
+        .expect("second token");
+    let fresh = context
+        .get("/_/api/v1/me", Some(&unaffected.plaintext))
+        .await;
+    assert_eq!(
+        fresh.status,
+        StatusCode::OK,
+        "the limit is per token, not per user"
+    );
+}
+
+#[tokio::test]
+async fn json_and_problem_responses_disable_content_type_sniffing() {
+    let context = TestContext::new().await;
+    let admin = bootstrap_test_admin(&context).await;
+    let token = create_token(&context.db, admin.id, "nosniff", None)
+        .await
+        .expect("token");
+
+    let cases = [
+        ("/_/api/v1/me", None),
+        ("/_/api/v1/me", Some(token.plaintext.as_str())),
+        ("/_/api/v1/unknown", None),
+        ("/_/health", None),
+    ];
+    for (uri, token) in cases {
+        let response = context.get(uri, token).await;
+        let nosniff = response
+            .headers
+            .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(nosniff, Some("nosniff"), "missing nosniff on {uri}");
+    }
+}
+
+#[tokio::test]
 async fn unauthenticated_request_to_me_returns_problem_details() {
     let context = TestContext::new().await;
 

@@ -20,7 +20,6 @@ use crate::problems::ProblemDetails;
 use crate::settings;
 use crate::timeutil;
 use crate::tokens;
-use crate::users::Role;
 
 pub const DEFAULT_PAGE_LIMIT: i64 = 20;
 pub const MAX_PAGE_LIMIT: i64 = 100;
@@ -70,7 +69,9 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/_/api/v1/password-resets/{token}",
-            get(validate_password_reset),
+            // The Admin revoke handler shares this route with the public
+            // validation handler and parses the segment as an id.
+            get(validate_password_reset).delete(revoke_password_reset),
         )
         .route(
             "/_/api/v1/password-resets/{token}/accept",
@@ -109,6 +110,7 @@ pub fn router() -> Router<AppState> {
         validate_invite,
         accept_invite,
         create_password_reset,
+        revoke_password_reset,
         validate_password_reset,
         accept_password_reset,
         create_link,
@@ -262,7 +264,7 @@ async fn update_me(
         payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
     let updated = crate::users::update_email(
         &state.db,
-        user.user.id,
+        user.id(),
         crate::users::EmailChange {
             email: payload.email,
         },
@@ -300,7 +302,7 @@ async fn change_password(
         payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
     crate::users::change_password(
         &state.db,
-        user.user.id,
+        user.id(),
         &payload.current_password,
         &payload.new_password,
     )
@@ -337,7 +339,7 @@ async fn delete_me(
 ) -> Result<StatusCode, ProblemDetails> {
     let Json(payload) =
         payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
-    crate::users::delete_own_account(&state.db, user.user.id, &payload.password)
+    crate::users::delete_own_account(&state.db, user.id(), &payload.password)
         .await
         .map_err(|error| error.into_problem(uri.path()))?;
     Ok(StatusCode::NO_CONTENT)
@@ -735,6 +737,10 @@ pub struct CreateLinkRequest {
     pub destination_url: String,
     /// An optional custom Slug. An 8-character random Slug is generated when omitted.
     pub slug: Option<String>,
+    /// An optional password visitors must enter before the Link redirects.
+    pub password: Option<String>,
+    /// An optional RFC 3339 expiry. Stored in UTC.
+    pub expires_at: Option<String>,
 }
 
 fn deserialize_optional_password<'de, D>(
@@ -839,11 +845,22 @@ async fn create_link(
 ) -> Result<(StatusCode, Json<LinkResponse>), ProblemDetails> {
     let Json(payload) =
         payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
-    let link = links::create_link(
+    if let Some(retry_after) = state.link_create_limiter.check_and_record(&user.id()) {
+        return Err(ProblemDetails::rate_limited(
+            "The Link creation rate limit has been exceeded.",
+            uri.path(),
+            retry_after,
+        ));
+    }
+    let link = links::create_link_with(
         &state.db,
-        user.user.id,
-        &payload.destination_url,
-        payload.slug.as_deref(),
+        links::NewLink {
+            owner_id: user.id(),
+            destination_url: &payload.destination_url,
+            slug: payload.slug.as_deref(),
+            password: payload.password.as_deref(),
+            expires_at: payload.expires_at.as_deref(),
+        },
     )
     .await
     .map_err(|error| error.into_problem(uri.path()))?;
@@ -936,7 +953,7 @@ async fn list_links(
 ) -> Result<Json<LinkListResponse>, ProblemDetails> {
     let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
     let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
-    let is_admin = user.user.role == Role::Admin;
+    let is_admin = user.is_admin();
     if query.owner_id.is_some() && !is_admin {
         return Err(ProblemDetails::new(
             StatusCode::FORBIDDEN,
@@ -950,7 +967,7 @@ async fn list_links(
         owner_id: if is_admin {
             query.owner_id
         } else {
-            Some(user.user.id)
+            Some(user.id())
         },
         status: parse_link_status(query.status.as_deref(), uri.path())?,
         q: query.q.clone(),
@@ -998,7 +1015,7 @@ async fn get_link(
     else {
         return Err(ProblemDetails::not_found("Link not found.", uri.path()));
     };
-    if link.owner_id != user.user.id && user.user.role != Role::Admin {
+    if !links::can_manage(&link, user.id(), user.is_admin()) {
         return Err(ProblemDetails::new(
             StatusCode::FORBIDDEN,
             "forbidden",
@@ -1039,8 +1056,8 @@ async fn update_link(
     let updated = links::update_link(
         &state.db,
         link_id,
-        user.user.id,
-        user.user.role == Role::Admin,
+        user.id(),
+        user.is_admin(),
         links::LinkChanges {
             destination_url: payload.destination_url,
             slug: payload.slug,
@@ -1076,14 +1093,9 @@ async fn delete_link(
     path: Result<Path<i64>, PathRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
     let Path(link_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    links::delete_link(
-        &state.db,
-        link_id,
-        user.user.id,
-        user.user.role == Role::Admin,
-    )
-    .await
-    .map_err(|error| error.into_problem(uri.path()))?;
+    links::delete_link(&state.db, link_id, user.id(), user.is_admin())
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1167,7 +1179,7 @@ async fn ensure_link_readable(
     else {
         return Err(ProblemDetails::not_found("Link not found.", instance));
     };
-    if link.owner_id != user.user.id && user.user.role != Role::Admin {
+    if !links::can_manage(&link, user.id(), user.is_admin()) {
         return Err(ProblemDetails::new(
             StatusCode::FORBIDDEN,
             "forbidden",
@@ -1368,7 +1380,7 @@ async fn list_tokens(
 ) -> Result<Json<TokenListResponse>, ProblemDetails> {
     let query = query.map_err(|rejection| pagination_problem(rejection, uri.path()))?;
     let (limit, offset) = resolve_pagination(query.limit, query.offset, uri.path())?;
-    let (items, total) = tokens::list_tokens(&state.db, user.user.id, limit, offset)
+    let (items, total) = tokens::list_tokens(&state.db, user.id(), limit, offset)
         .await
         .map_err(|error| error.into_problem(uri.path()))?;
     Ok(Json(TokenListResponse {
@@ -1401,7 +1413,7 @@ async fn create_token(
         payload.map_err(|rejection| json_rejection_problem(rejection, uri.path()))?;
     let created = tokens::create_token(
         &state.db,
-        user.user.id,
+        user.id(),
         &payload.name,
         payload.expires_at.as_deref(),
     )
@@ -1444,7 +1456,7 @@ async fn revoke_token(
     path: Result<Path<i64>, PathRejection>,
 ) -> Result<StatusCode, ProblemDetails> {
     let Path(token_id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
-    tokens::revoke_token(&state.db, user.user.id, token_id)
+    tokens::revoke_token(&state.db, user.id(), token_id)
         .await
         .map_err(|error| error.into_problem(uri.path()))?;
     Ok(StatusCode::NO_CONTENT)
@@ -1806,6 +1818,36 @@ async fn create_password_reset(
         StatusCode::CREATED,
         Json(CreatedPasswordResetResponse::from(created)),
     ))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/_/api/v1/password-resets/{id}",
+    tag = "password-resets",
+    security(("bearerAuth" = [])),
+    params(("id" = i64, Path, description = "The password-reset id.")),
+    responses(
+        (status = 204, description = "The password-reset token was revoked."),
+        (status = 401, description = "Missing, invalid, revoked, or expired API token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 403, description = "The current User is not an Admin.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "No such password-reset token.", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 409, description = "The password-reset token was already used.", body = ProblemDetails, content_type = "application/problem+json")
+    )
+)]
+async fn revoke_password_reset(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    uri: Uri,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<StatusCode, ProblemDetails> {
+    let Path(id) = path.map_err(|rejection| path_rejection_problem(rejection, uri.path()))?;
+    let id: i64 = id
+        .parse()
+        .map_err(|_| ProblemDetails::not_found("Password-reset token not found.", uri.path()))?;
+    password_resets::revoke_password_reset(&state.db, id)
+        .await
+        .map_err(|error| error.into_problem(uri.path()))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Serialize, ToSchema)]

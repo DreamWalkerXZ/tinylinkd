@@ -92,6 +92,16 @@ async fn submit_password_with_headers(
     context.send(request).await
 }
 
+async fn submit_password_to_uri(context: &TestContext, uri: &str, password: &str) -> TestResponse {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("password={password}")))
+        .expect("request");
+    context.send(request).await
+}
+
 fn location(response: &TestResponse) -> Option<&str> {
     response
         .headers
@@ -461,6 +471,44 @@ async fn a_protected_link_asks_for_a_password_and_unlocks_with_the_cookie() {
 }
 
 #[tokio::test]
+async fn the_query_string_survives_the_password_form_and_unlock_redirect() {
+    let context = TestContext::new().await;
+    let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
+    protect_link(&context, &token, "guarded", "open sesame").await;
+    let uri = "/guarded?utm_source=newsletter&x=1";
+    let form_action = "action=\"/guarded?utm_source=newsletter&#38;x=1\"";
+
+    let form = context.get(uri, None).await;
+    assert_eq!(form.status, StatusCode::OK);
+    let body = String::from_utf8_lossy(&form.body);
+    assert!(
+        body.contains(form_action),
+        "the form must submit back with the query string: {body}"
+    );
+
+    let wrong = submit_password_to_uri(&context, uri, "wrong password").await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+    let body = String::from_utf8_lossy(&wrong.body);
+    assert!(
+        body.contains(form_action),
+        "the retried form must keep the query string: {body}"
+    );
+
+    let unlocked = submit_password_to_uri(&context, uri, "open sesame").await;
+    assert_eq!(unlocked.status, StatusCode::SEE_OTHER);
+    assert_eq!(location(&unlocked), Some(uri));
+
+    let redirect = context
+        .get_with_headers(uri, cookie_header(&set_cookie(&unlocked)))
+        .await;
+    assert_eq!(redirect.status, StatusCode::FOUND);
+    assert_eq!(
+        location(&redirect),
+        Some("https://example.com/destination?utm_source=newsletter&x=1")
+    );
+}
+
+#[tokio::test]
 async fn only_the_owner_or_an_admin_can_change_a_link_password() {
     let context = TestContext::new().await;
     let (_, alice_token) = create_user_with_token(&context, "alice", Role::User).await;
@@ -579,4 +627,53 @@ async fn the_owner_sets_changes_and_clears_a_link_password() {
     assert_eq!(empty.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(empty.content_type(), "application/problem+json");
     assert_eq!(empty.json()["code"], "invalid_password");
+}
+
+#[tokio::test]
+async fn api_link_creation_accepts_a_password_like_the_ui() {
+    let context = TestContext::new().await;
+    let (_user, token) = create_user_with_token(&context, "alice", Role::User).await;
+
+    let response = context
+        .post(
+            "/_/api/v1/links",
+            Some(&token),
+            json!({
+                "destination_url": "https://example.com/api-created",
+                "slug": "api-created",
+                "password": "s3cret-pass",
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let link = response.json();
+    assert_eq!(link["has_password"], true);
+    assert_no_password_hash(&response);
+
+    // An API-created Link is indistinguishable from a UI-created one: it asks
+    // for the password before redirecting.
+    let form = context.get("/api-created", None).await;
+    assert_eq!(form.status, StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&form.body).contains("Password required"),
+        "expected the password form"
+    );
+
+    let wrong = submit_password(&context, "api-created", "not-the-password").await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+
+    let unlock = submit_password(&context, "api-created", "s3cret-pass").await;
+    assert_eq!(unlock.status, StatusCode::SEE_OTHER);
+
+    let redirect = context
+        .get_with_headers("/api-created", cookie_header(&set_cookie(&unlock)))
+        .await;
+    assert_eq!(redirect.status, StatusCode::FOUND);
+    assert_eq!(location(&redirect), Some("https://example.com/api-created"));
 }
