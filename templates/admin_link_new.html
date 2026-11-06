@@ -1,0 +1,56 @@
+{% extends "admin_base.html" %}
+{% block title %}New Link - {{ nav.instance_name }}{% endblock %}
+{% block content %}
+<h1>New Link</h1>
+
+{% match errors.general %}
+{% when Some with (message) %}
+<p class="error" role="alert">{{ message }}</p>
+{% when None %}
+{% endmatch %}
+
+<form method="post" action="/_/links">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  <label for="destination_url">Destination URL</label>
+  <input id="destination_url" name="destination_url" type="text" value="{{ destination_url }}" required autofocus placeholder="https://example.com/page">
+  {% match errors.destination_url %}
+  {% when Some with (message) %}
+  <p class="error" id="destination_url_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">An absolute http or https URL.</p>
+
+  <label for="slug">Slug (optional)</label>
+  <input id="slug" name="slug" type="text" value="{{ slug }}" placeholder="Leave blank for a random Slug">
+  {% match errors.slug %}
+  {% when Some with (message) %}
+  <p class="error" id="slug_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">3-64 characters: lowercase letters, digits, and internal hyphens.</p>
+
+  <label for="password">Password (optional)</label>
+  <input id="password" name="password" type="password" autocomplete="new-password">
+  {% match errors.password %}
+  {% when Some with (message) %}
+  <p class="error" id="password_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">Visitors must enter this password before the Link redirects.</p>
+
+  <label for="expires_at">Expiry (optional)</label>
+  <input id="expires_at" name="expires_at" type="text" value="{{ expires_at }}" placeholder="2030-01-02T03:04:05Z">
+  {% match errors.expires_at %}
+  {% when Some with (message) %}
+  <p class="error" id="expires_at_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">An RFC 3339 UTC timestamp. Leave blank for a permanent Link.</p>
+
+  <div class="actions">
+    <button class="primary" type="submit">Create Link</button>
+    <a href="/_/links">Cancel</a>
+  </div>
+</form>
+{% endblock %}

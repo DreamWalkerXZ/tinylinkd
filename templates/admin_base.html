@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}{{ nav.instance_name }}{% endblock %}</title>
+    <link rel="stylesheet" href="/_/static/admin.css">
+  </head>
+  <body>
+    <header class="site">
+      <nav>
+        <a href="/_/links"><strong>{{ nav.instance_name }}</strong></a>
+        <a href="/_/links">Links</a>
+        {% if nav.is_admin %}
+        <a href="/_/users">Users</a>
+        <a href="/_/invites">Invites</a>
+        <a href="/_/settings">Settings</a>
+        {% endif %}
+        <span class="spacer"></span>
+        <span class="muted">{{ nav.username }}{% if nav.is_admin %} (Admin){% endif %}</span>
+        <form class="inline" method="post" action="/_/logout">
+          <input type="hidden" name="csrf_token" value="{{ nav.csrf_token }}">
+          <button type="submit">Sign out</button>
+        </form>
+      </nav>
+    </header>
+    <main>
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

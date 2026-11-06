@@ -1,0 +1,81 @@
+{% extends "admin_base.html" %}
+{% block title %}Edit Link - {{ nav.instance_name }}{% endblock %}
+{% block content %}
+<h1>Edit Link</h1>
+
+{% match errors.general %}
+{% when Some with (message) %}
+<p class="error" role="alert">{{ message }}</p>
+{% when None %}
+{% endmatch %}
+
+<form method="post" action="/_/links/{{ link_id }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  <label for="destination_url">Destination URL</label>
+  <input id="destination_url" name="destination_url" type="text" value="{{ destination_url }}" required autofocus>
+  {% match errors.destination_url %}
+  {% when Some with (message) %}
+  <p class="error" id="destination_url_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">An absolute http or https URL.</p>
+
+  <label for="slug">Slug</label>
+  <input id="slug" name="slug" type="text" value="{{ slug }}" required>
+  {% match errors.slug %}
+  {% when Some with (message) %}
+  <p class="error" id="slug_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">Changing the Slug stops the old short URL immediately; another Link may claim it.</p>
+
+  {% if is_admin %}
+  <fieldset>
+    <legend>Owner</legend>
+    <label for="owner_id">Owner</label>
+    <select id="owner_id" name="owner_id">
+      {% for owner in owners %}
+      <option value="{{ owner.id }}"{% if owner.selected %} selected{% endif %}>{{ owner.username }}</option>
+      {% endfor %}
+    </select>
+    <p class="muted">Transfer this Link to another User. The previous owner loses access immediately.</p>
+  </fieldset>
+  {% endif %}
+
+  <fieldset>
+    <legend>Password</legend>
+    <p class="muted">{% if has_password %}This Link is currently protected.{% else %}This Link is not protected.{% endif %} Leave the field blank to keep the current setting.</p>
+    <label for="password">New password</label>
+    <input id="password" name="password" type="password" autocomplete="new-password">
+    {% match errors.password %}
+    {% when Some with (message) %}
+    <p class="error" id="password_error" role="alert">{{ message }}</p>
+    {% when None %}
+    {% endmatch %}
+    {% if has_password %}
+    <p><label><input type="checkbox" name="remove_password" value="1"> Remove the password</label></p>
+    {% endif %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Expiry</legend>
+    <p class="muted">A time in the Instance timezone ({{ timezone }}), as YYYY-MM-DD HH:MM:SS. An RFC 3339 timestamp is also accepted. Leave the field unchanged to keep the current expiry.</p>
+    <label for="expires_at">Expires at</label>
+    <input id="expires_at" name="expires_at" type="text" value="{{ expires_at }}" placeholder="2030-01-02 03:04:05">
+    {% match errors.expires_at %}
+    {% when Some with (message) %}
+    <p class="error" id="expires_at_error" role="alert">{{ message }}</p>
+    {% when None %}
+    {% endmatch %}
+    {% if !expires_at.is_empty() %}
+    <p><label><input type="checkbox" name="remove_expiry" value="1"> Remove the expiry</label></p>
+    {% endif %}
+  </fieldset>
+
+  <div class="actions">
+    <button class="primary" type="submit">Save changes</button>
+    <a href="/_/links/{{ link_id }}">Cancel</a>
+  </div>
+</form>
+{% endblock %}

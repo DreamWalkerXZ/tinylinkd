@@ -1,0 +1,104 @@
+{% extends "admin_base.html" %}
+{% block title %}{{ link.slug }} - {{ nav.instance_name }}{% endblock %}
+{% block content %}
+<h1>Link <code>{{ link.slug }}</code></h1>
+
+{% match warning %}
+{% when Some with (message) %}
+<p class="notice" role="status">{{ message }}</p>
+{% when None %}
+{% endmatch %}
+
+<div class="cards">
+  <div class="card"><strong>{{ total_clicks }}</strong>Total clicks</div>
+  <div class="card"><strong>{{ human_clicks }}</strong>Human clicks</div>
+  <div class="card"><strong>{{ bot_clicks }}</strong>Bot clicks</div>
+</div>
+
+<dl class="summary">
+  <dt>Short URL</dt>
+  <dd><a href="{{ link.short_url }}">{{ link.short_url }}</a></dd>
+  <dt>Destination URL</dt>
+  <dd>{{ link.destination_url }}</dd>
+  <dt>Status</dt>
+  <dd><span class="badge">{{ link.status }}</span></dd>
+  <dt>Password</dt>
+  <dd>{% if link.has_password %}Protected{% else %}Not protected{% endif %}</dd>
+  <dt>Expiry</dt>
+  <dd>{% match link.expires_at %}{% when Some with (expiry) %}{{ expiry }}{% when None %}Never{% endmatch %}</dd>
+  <dt>Created</dt>
+  <dd>{{ link.created_at }}</dd>
+  <dt>Updated</dt>
+  <dd>{{ link.updated_at }}</dd>
+  {% if is_admin %}
+  <dt>Owner</dt>
+  <dd>{{ link.owner }}</dd>
+  {% endif %}
+</dl>
+
+<div class="actions">
+  <a href="/_/links/{{ link.id }}/edit">Edit Link</a>
+  <a href="/_/links">Back to Links</a>
+</div>
+
+<form method="post" action="/_/links/{{ link.id }}/delete">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <p class="muted">Deleting a Link also deletes its Clicks, and its Slug is released immediately.</p>
+  <p><label><input type="checkbox" name="confirm" value="1" required> Yes, delete this Link</label></p>
+  <button class="danger" type="submit">Delete Link</button>
+</form>
+
+<h2>Statistics</h2>
+
+<h3>Recent Clicks</h3>
+{% if clicks.is_empty() %}
+<p class="muted">No Clicks yet.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Time</th><th>IP</th><th>Device</th><th>User-Agent</th><th>Referrer</th></tr></thead>
+  <tbody>
+    {% for click in clicks %}
+    <tr>
+      <td>{{ click.clicked_at }}</td>
+      <td>{{ click.ip }}</td>
+      <td>{{ click.device }}</td>
+      <td class="destination">{{ click.user_agent }}</td>
+      <td>{% match click.referer %}{% when Some with (referer) %}{{ referer }}{% when None %}-{% endmatch %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted">Times use the Instance timezone: {{ timezone }}.</p>
+{% endif %}
+
+<h3>By device</h3>
+{% if devices.is_empty() %}
+<p class="muted">No Clicks yet.</p>
+{% else %}
+<table>
+  <thead><tr><th>Device</th><th>Clicks</th></tr></thead>
+  <tbody>
+    {% for device in devices %}
+    <tr><td>{{ device.device }}</td><td>{{ device.clicks }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h3>By day</h3>
+{% if days.is_empty() %}
+<p class="muted">No Clicks yet.</p>
+{% else %}
+<table>
+  <thead><tr><th>Date</th><th>Total</th><th>Human</th><th>Bot</th></tr></thead>
+  <tbody>
+    {% for day in days %}
+    <tr><td>{{ day.date }}</td><td>{{ day.total_clicks }}</td><td>{{ day.human_clicks }}</td><td>{{ day.bot_clicks }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">Days use the Instance timezone: {{ timezone }}.</p>
+{% endif %}
+{% endblock %}

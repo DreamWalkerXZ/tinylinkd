@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --all-targets --all-features
+      # The OpenAPI document and its snapshot are validated by tests/openapi.rs.
+      - name: OpenAPI validation
+        run: cargo test --all-features --test openapi
+
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: tld-x86_64-unknown-linux-musl
+            zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: tld-aarch64-unknown-linux-musl
+            zigbuild: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: tld-aarch64-apple-darwin
+            zigbuild: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install Zig
+        if: matrix.zigbuild
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install cargo-zigbuild
+        if: matrix.zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Build static musl binary
+        if: matrix.zigbuild
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }}
+      - name: Build native macOS binary
+        if: ${{ !matrix.zigbuild }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/tld" "dist/${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  docker:
+    name: docker
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: tld-x86_64-unknown-linux-musl
+          path: dist/amd64
+      - uses: actions/download-artifact@v8
+        with:
+          name: tld-aarch64-unknown-linux-musl
+          path: dist/arm64
+      - name: Arrange Docker build context
+        run: |
+          mv dist/amd64/tld-x86_64-unknown-linux-musl dist/amd64/tld
+          mv dist/arm64/tld-aarch64-unknown-linux-musl dist/arm64/tld
+          chmod +x dist/amd64/tld dist/arm64/tld
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/tinylinkd
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha
+      - name: Build multi-arch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build smoke-test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: tinylinkd:smoke
+          cache-from: type=gha
+      - name: Smoke test health endpoint with a mounted /data volume
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d)"
+          chmod 0777 "$data_dir"
+          trap 'docker rm -f tld-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name tld-smoke \
+            --publish 18080:8080 \
+            --volume "$data_dir:/data" \
+            --env TLD_BASE_URL=http://127.0.0.1:18080 \
+            tinylinkd:smoke
+          for _ in $(seq 1 30); do
+            if body="$(curl -fsS http://127.0.0.1:18080/_/health 2>/dev/null)"; then
+              printf '%s\n' "$body"
+              echo "$body" | grep -q '"status":"ok"'
+              test -f "$data_dir/tinylinkd.db"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs tld-smoke
+          exit 1
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    needs: [test, build, docker]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: tld-*
+          merge-multiple: true
+          path: dist
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum tld-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

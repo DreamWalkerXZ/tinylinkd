@@ -1,0 +1,10 @@
+.git
+.github
+target
+data
+tests
+docs
+.env
+*.db
+*.db-wal
+*.db-shm

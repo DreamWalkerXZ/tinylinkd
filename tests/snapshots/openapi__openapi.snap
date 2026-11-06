@@ -1,0 +1,3141 @@
+---
+source: tests/openapi.rs
+expression: "serde_json::to_string_pretty(&document).expect(\"pretty JSON\")"
+---
+{
+  "components": {
+    "schemas": {
+      "AcceptInviteRequest": {
+        "properties": {
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "type": "object"
+      },
+      "AcceptPasswordResetRequest": {
+        "properties": {
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "type": "object"
+      },
+      "ChangePasswordRequest": {
+        "properties": {
+          "current_password": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "type": "object"
+      },
+      "ClickListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ClickResponse"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "offset": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "type": "object"
+      },
+      "ClickResponse": {
+        "properties": {
+          "clicked_at": {
+            "type": "string"
+          },
+          "device": {
+            "description": "One of `desktop`, `mobile`, `tablet`, `bot`, or `unknown`.",
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ip": {
+            "type": "string"
+          },
+          "is_bot": {
+            "description": "Whether the User-Agent matched a known crawler pattern. Bot Clicks are\nstored and listed but excluded from human counts.",
+            "type": "boolean"
+          },
+          "referer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_agent": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "clicked_at",
+          "ip",
+          "user_agent",
+          "device",
+          "is_bot"
+        ],
+        "type": "object"
+      },
+      "CreateLinkRequest": {
+        "properties": {
+          "destination_url": {
+            "description": "The absolute `http` or `https` URL the Link redirects to.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "An optional RFC 3339 expiry. Stored in UTC.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "description": "An optional password visitors must enter before the Link redirects.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "description": "An optional custom Slug. An 8-character random Slug is generated when omitted.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "destination_url"
+        ],
+        "type": "object"
+      },
+      "CreateTokenRequest": {
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "CreatedInviteResponse": {
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "token": {
+            "description": "The plaintext Invite token. Returned only in this response.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "token",
+          "expires_at",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "CreatedPasswordResetResponse": {
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "token": {
+            "description": "The plaintext password-reset token. Returned only in this response.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "token",
+          "expires_at",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "CreatedTokenResponse": {
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "description": "The plaintext API token. Returned only in this response.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "token",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "DayCount": {
+        "properties": {
+          "bot_clicks": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "date": {
+            "description": "The calendar date in the Instance timezone, as `YYYY-MM-DD`.",
+            "type": "string"
+          },
+          "human_clicks": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_clicks": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date",
+          "total_clicks",
+          "human_clicks",
+          "bot_clicks"
+        ],
+        "type": "object"
+      },
+      "DeleteAccountRequest": {
+        "properties": {
+          "password": {
+            "description": "The current password. `current_password` is accepted as an alias.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "type": "object"
+      },
+      "InviteListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InviteResponse"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "offset": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "type": "object"
+      },
+      "InviteResponse": {
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "created_by": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "One of `pending`, `used`, `expired`, or `revoked`.",
+            "type": "string"
+          },
+          "used_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "created_by",
+          "status",
+          "expires_at",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "InviteValidationResponse": {
+        "properties": {
+          "expires_at": {
+            "type": "string"
+          },
+          "status": {
+            "description": "One of `valid`, `expired`, `used`, or `revoked`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "LinkListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LinkResponse"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "offset": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "type": "object"
+      },
+      "LinkResponse": {
+        "properties": {
+          "bot_clicks": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "destination_url": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_password": {
+            "description": "Whether the Link requires a password before it redirects.",
+            "type": "boolean"
+          },
+          "human_clicks": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "owner_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "short_url": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/LinkStatus"
+          },
+          "total_clicks": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "warning": {
+            "description": "Present only when an update changed the Slug: the old short URL stops\nworking immediately and may be reused by another Link.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "owner_id",
+          "slug",
+          "short_url",
+          "destination_url",
+          "has_password",
+          "status",
+          "created_at",
+          "updated_at",
+          "total_clicks",
+          "human_clicks",
+          "bot_clicks"
+        ],
+        "type": "object"
+      },
+      "LinkStatsResponse": {
+        "properties": {
+          "bot_clicks": {
+            "description": "Clicks whose User-Agent matched a crawler pattern.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "by_day": {
+            "description": "Clicks by calendar day in the Instance timezone, oldest first. Only\ndays with Clicks appear.",
+            "items": {
+              "$ref": "#/components/schemas/DayCount"
+            },
+            "type": "array"
+          },
+          "by_device": {
+            "additionalProperties": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "description": "Clicks by device, including bot-device Clicks.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "human_clicks": {
+            "description": "Clicks whose User-Agent did not match a crawler pattern.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_clicks": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_clicks",
+          "human_clicks",
+          "bot_clicks",
+          "by_device",
+          "by_day"
+        ],
+        "type": "object"
+      },
+      "LinkStatus": {
+        "enum": [
+          "active",
+          "expired"
+        ],
+        "type": "string"
+      },
+      "Pagination": {
+        "properties": {
+          "limit": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "PasswordResetValidationResponse": {
+        "properties": {
+          "expires_at": {
+            "type": "string"
+          },
+          "status": {
+            "description": "One of `valid`, `expired`, `used`, or `revoked`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "ProblemDetails": {
+        "description": "An RFC 9457 Problem Details response with a machine-readable `code`.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "status": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code"
+        ],
+        "type": "object"
+      },
+      "SettingsResponse": {
+        "description": "The mutable Instance settings. The HMAC signing key and the `secrets`\ntable are never part of this response.",
+        "properties": {
+          "click_retention_days": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "instance_name": {
+            "type": "string"
+          },
+          "password_unlock_ttl_seconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "timezone": {
+            "description": "The IANA timezone used for daily Click buckets and display.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance_name",
+          "timezone",
+          "click_retention_days",
+          "password_unlock_ttl_seconds"
+        ],
+        "type": "object"
+      },
+      "TokenListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TokenResponse"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "offset": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "type": "object"
+      },
+      "TokenResponse": {
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "UpdateLinkRequest": {
+        "properties": {
+          "destination_url": {
+            "description": "The new absolute `http` or `https` URL the Link redirects to.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "description": "The Link's expiry as an RFC 3339 timestamp, stored and returned in UTC.\nOmit the field to leave the expiry unchanged; send `null` to remove it\nand make the Link permanent. A timestamp at or before the current time\nmakes the Link expired.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner_id": {
+            "description": "Admin-only: transfer the Link to another existing User.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "password": {
+            "description": "A non-empty string sets or changes the Link's password; `null` clears\nit and makes the Link redirect without a password. Omit the field to\nleave the password unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "description": "A new Slug. A Slug change returns a `warning` because the old short URL\nstops working immediately and may be reused by another Link.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpdateProfileRequest": {
+        "properties": {
+          "email": {
+            "description": "The new optional email. Omit it to keep the current email; send `null`\nor an empty string to clear it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpdateSettingsRequest": {
+        "properties": {
+          "click_retention_days": {
+            "description": "The Click retention window in days. Must be positive.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "instance_name": {
+            "description": "A non-empty Instance name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password_unlock_ttl_seconds": {
+            "description": "The password-unlock cookie lifetime in seconds. Must be positive.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "timezone": {
+            "description": "An IANA timezone name, for example `Europe/London`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpdateUserRequest": {
+        "properties": {
+          "disabled": {
+            "description": "When true, disable the User and revoke all of their API tokens. When\nfalse, re-enable the User; revoked tokens are never restored.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "email": {
+            "description": "The new optional email. Omit it to keep the current email; send `null`\nor an empty string to clear it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UserListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UserProfile"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "offset": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "type": "object"
+      },
+      "UserProfile": {
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "role": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "role",
+          "disabled",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "The JSON API for a self-hosted tinylinkd Instance. Authenticate with a Bearer API token.",
+    "license": {
+      "identifier": "MIT OR Apache-2.0",
+      "name": "MIT OR Apache-2.0"
+    },
+    "title": "tinylinkd API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/_/api/v1/invites": {
+      "get": {
+        "operationId": "list_invites",
+        "parameters": [
+          {
+            "description": "Maximum number of Invites to return (default 20, maximum 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of Invites to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteListResponse"
+                }
+              }
+            },
+            "description": "All Invites with their status. Plaintext tokens and hashes are never listed."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid pagination parameters."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "invites"
+        ]
+      },
+      "post": {
+        "operationId": "create_invite",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedInviteResponse"
+                }
+              }
+            },
+            "description": "Invite created. The plaintext `token` is returned only in this response."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "invites"
+        ]
+      }
+    },
+    "/_/api/v1/invites/{id}": {
+      "delete": {
+        "operationId": "revoke_invite",
+        "parameters": [
+          {
+            "description": "The Invite id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The Invite was revoked. Revoking an already revoked Invite is a no-op."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Invite."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Invite has already been used."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "invites"
+        ]
+      }
+    },
+    "/_/api/v1/invites/{token}": {
+      "get": {
+        "operationId": "validate_invite",
+        "parameters": [
+          {
+            "description": "The plaintext Invite token.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteValidationResponse"
+                }
+              }
+            },
+            "description": "The Invite is valid, expired, used, or revoked."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Invite."
+          }
+        },
+        "tags": [
+          "invites"
+        ]
+      }
+    },
+    "/_/api/v1/invites/{token}/accept": {
+      "post": {
+        "operationId": "accept_invite",
+        "parameters": [
+          {
+            "description": "The plaintext Invite token.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            },
+            "description": "The Invite was accepted and the User was created."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Invite."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Invite was already used or revoked, or the username or email is taken."
+          },
+          "410": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Invite has expired."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The username, email, or password is invalid."
+          }
+        },
+        "tags": [
+          "invites"
+        ]
+      }
+    },
+    "/_/api/v1/links": {
+      "get": {
+        "operationId": "list_links",
+        "parameters": [
+          {
+            "description": "Maximum number of Links to return (default 20, maximum 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of Links to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Filter by status: `active` or `expired`.",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Search the Slug and Destination URL.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort order: `created_at` (oldest first) or `-created_at` (newest first, the default).",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Admin-only: list only the Links owned by this User.",
+            "in": "query",
+            "name": "owner_id",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkListResponse"
+                }
+              }
+            },
+            "description": "The current User's Links, or all Links for an Admin."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A non-Admin used the Admin-only `owner_id` filter."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid pagination, status, or sort parameters."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "links"
+        ]
+      },
+      "post": {
+        "operationId": "create_link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkResponse"
+                }
+              }
+            },
+            "description": "Link created."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The custom Slug is already taken."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Destination URL or Slug is invalid."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "links"
+        ]
+      }
+    },
+    "/_/api/v1/links/{id}": {
+      "delete": {
+        "operationId": "delete_link",
+        "parameters": [
+          {
+            "description": "The Link id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The Link was hard-deleted with its Clicks, and its Slug was released."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Link belongs to another User and the caller is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Link."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "links"
+        ]
+      },
+      "get": {
+        "operationId": "get_link",
+        "parameters": [
+          {
+            "description": "The Link id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkResponse"
+                }
+              }
+            },
+            "description": "The Link."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Link belongs to another User and the caller is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Link."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "links"
+        ]
+      },
+      "patch": {
+        "operationId": "update_link",
+        "parameters": [
+          {
+            "description": "The Link id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkResponse"
+                }
+              }
+            },
+            "description": "The Link was updated. A Slug change returns a `warning` because the old short URL stops working and may be reused."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Link belongs to another User and the caller is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Link."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested Slug is already taken."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Destination URL, Slug, or expiry is invalid."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "links"
+        ]
+      }
+    },
+    "/_/api/v1/links/{id}/clicks": {
+      "get": {
+        "operationId": "list_link_clicks",
+        "parameters": [
+          {
+            "description": "The Link id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Include Clicks at or after this RFC 3339 UTC timestamp. Unbounded when omitted.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include Clicks at or before this RFC 3339 UTC timestamp. Unbounded when omitted.",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of Clicks to return (default 20, maximum 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of Clicks to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClickListResponse"
+                }
+              }
+            },
+            "description": "The Link's Clicks, newest first."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Link belongs to another User and the caller is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Link."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid pagination or time range parameters."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "analytics"
+        ]
+      }
+    },
+    "/_/api/v1/links/{id}/stats": {
+      "get": {
+        "operationId": "link_stats",
+        "parameters": [
+          {
+            "description": "The Link id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Include Clicks at or after this RFC 3339 UTC timestamp. Unbounded when omitted.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include Clicks at or before this RFC 3339 UTC timestamp. Unbounded when omitted.",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bucket size: `day` (the default).",
+            "in": "query",
+            "name": "interval",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkStatsResponse"
+                }
+              }
+            },
+            "description": "Total, human, and bot Click counts with by-device and by-day buckets."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The Link belongs to another User and the caller is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such Link."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid time range or interval parameters."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "analytics"
+        ]
+      }
+    },
+    "/_/api/v1/me": {
+      "delete": {
+        "operationId": "delete_me",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The current User was deleted."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token, or the password is incorrect."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The User owns Links and cannot be deleted."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The password is missing or the body is malformed."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "auth"
+        ]
+      },
+      "get": {
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            },
+            "description": "The current User profile."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "auth"
+        ]
+      },
+      "patch": {
+        "operationId": "update_me",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            },
+            "description": "The updated current User profile."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The email is already in use."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The email is invalid."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/_/api/v1/me/password": {
+      "post": {
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The password was changed."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token, or the current password is incorrect."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The new password is invalid or the body is malformed."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/_/api/v1/password-resets/{id}": {
+      "delete": {
+        "operationId": "revoke_password_reset",
+        "parameters": [
+          {
+            "description": "The password-reset id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The password-reset token was revoked."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such password-reset token."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The password-reset token was already used."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "password-resets"
+        ]
+      }
+    },
+    "/_/api/v1/password-resets/{token}": {
+      "get": {
+        "operationId": "validate_password_reset",
+        "parameters": [
+          {
+            "description": "The plaintext password-reset token.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasswordResetValidationResponse"
+                }
+              }
+            },
+            "description": "The password-reset token is valid, expired, used, or revoked."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such password-reset token."
+          }
+        },
+        "tags": [
+          "password-resets"
+        ]
+      }
+    },
+    "/_/api/v1/password-resets/{token}/accept": {
+      "post": {
+        "operationId": "accept_password_reset",
+        "parameters": [
+          {
+            "description": "The plaintext password-reset token.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptPasswordResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The password was changed and the token was consumed."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such password-reset token."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The password-reset token was already used or revoked."
+          },
+          "410": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The password-reset token has expired."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The new password is invalid."
+          }
+        },
+        "tags": [
+          "password-resets"
+        ]
+      }
+    },
+    "/_/api/v1/settings": {
+      "get": {
+        "operationId": "get_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "The mutable Instance settings."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "settings"
+        ]
+      },
+      "patch": {
+        "operationId": "update_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "The complete updated Instance settings."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A setting is invalid or the body is malformed."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/_/api/v1/tokens": {
+      "get": {
+        "operationId": "list_tokens",
+        "parameters": [
+          {
+            "description": "Maximum number of API tokens to return (default 20, maximum 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of API tokens to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenListResponse"
+                }
+              }
+            },
+            "description": "The current User's API tokens. Plaintext tokens are never listed."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid pagination parameters."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "tokens"
+        ]
+      },
+      "post": {
+        "operationId": "create_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedTokenResponse"
+                }
+              }
+            },
+            "description": "API token created. The plaintext `token` is returned only in this response."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The token name or expiry is invalid."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/_/api/v1/tokens/{id}": {
+      "delete": {
+        "operationId": "revoke_token",
+        "parameters": [
+          {
+            "description": "The API token id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The API token was revoked."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such API token belongs to the current User."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/_/api/v1/users": {
+      "get": {
+        "operationId": "list_users",
+        "parameters": [
+          {
+            "description": "Maximum number of Users to return (default 20, maximum 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of Users to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserListResponse"
+                }
+              }
+            },
+            "description": "All Users with their role and disabled status."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid pagination parameters."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/_/api/v1/users/{id}": {
+      "delete": {
+        "operationId": "delete_user",
+        "parameters": [
+          {
+            "description": "The User id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The User was deleted."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such User."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The User owns Links and cannot be deleted."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "users"
+        ]
+      },
+      "get": {
+        "operationId": "get_user",
+        "parameters": [
+          {
+            "description": "The User id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            },
+            "description": "The User."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such User."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "users"
+        ]
+      },
+      "patch": {
+        "operationId": "update_user",
+        "parameters": [
+          {
+            "description": "The User id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            },
+            "description": "The User was updated."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such User."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The email is already in use."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The email is invalid or the body is malformed."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/_/api/v1/users/{id}/password-reset": {
+      "post": {
+        "operationId": "create_password_reset",
+        "parameters": [
+          {
+            "description": "The User id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedPasswordResetResponse"
+                }
+              }
+            },
+            "description": "Password-reset token created. The plaintext `token` is returned only in this response."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such User."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "password-resets"
+        ]
+      }
+    },
+    "/_/api/v1/users/{id}/tokens": {
+      "get": {
+        "operationId": "list_user_tokens",
+        "parameters": [
+          {
+            "description": "The User id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Maximum number of API tokens to return (default 20, maximum 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of API tokens to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenListResponse"
+                }
+              }
+            },
+            "description": "The User's API tokens. Plaintext tokens are never listed."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such User."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid pagination parameters."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "users"
+        ]
+      },
+      "post": {
+        "operationId": "create_user_token",
+        "parameters": [
+          {
+            "description": "The User id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedTokenResponse"
+                }
+              }
+            },
+            "description": "API token created for the User. The plaintext `token` is returned only in this response."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such User."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The User is disabled."
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The token name or expiry is invalid."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/_/api/v1/users/{id}/tokens/{token_id}": {
+      "delete": {
+        "operationId": "revoke_user_token",
+        "parameters": [
+          {
+            "description": "The User id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The API token id.",
+            "in": "path",
+            "name": "token_id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The API token was revoked."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Missing, invalid, revoked, or expired API token."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The current User is not an Admin."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "No such User or API token for that User."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "users"
+        ]
+      }
+    }
+  }
+}

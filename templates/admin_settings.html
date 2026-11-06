@@ -1,0 +1,55 @@
+{% extends "admin_base.html" %}
+{% block title %}Settings - {{ nav.instance_name }}{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+
+{% match errors.general %}
+{% when Some with (message) %}
+<p class="error" role="alert">{{ message }}</p>
+{% when None %}
+{% endmatch %}
+
+<form method="post" action="/_/settings">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  <label for="instance_name">Instance name</label>
+  <input id="instance_name" name="instance_name" type="text" value="{{ values.instance_name }}" required>
+  {% match errors.instance_name %}
+  {% when Some with (message) %}
+  <p class="error" id="instance_name_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">Shown in the Admin navigation and in page titles. Must not be empty.</p>
+
+  <label for="timezone">Timezone</label>
+  <input id="timezone" name="timezone" type="text" value="{{ values.timezone }}" required>
+  {% match errors.timezone %}
+  {% when Some with (message) %}
+  <p class="error" id="timezone_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">An IANA timezone name, such as <code>Europe/London</code>. Storage stays in UTC; this controls display and daily Click buckets.</p>
+
+  <label for="click_retention_days">Click retention (days)</label>
+  <input id="click_retention_days" name="click_retention_days" type="text" inputmode="numeric" value="{{ values.click_retention_days }}" required>
+  {% match errors.click_retention_days %}
+  {% when Some with (message) %}
+  <p class="error" id="click_retention_days_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">How long Clicks are kept. Must be a positive whole number of days.</p>
+
+  <label for="password_unlock_ttl_seconds">Password unlock lifetime (seconds)</label>
+  <input id="password_unlock_ttl_seconds" name="password_unlock_ttl_seconds" type="text" inputmode="numeric" value="{{ values.password_unlock_ttl_seconds }}" required>
+  {% match errors.password_unlock_ttl_seconds %}
+  {% when Some with (message) %}
+  <p class="error" id="password_unlock_ttl_seconds_error" role="alert">{{ message }}</p>
+  {% when None %}
+  {% endmatch %}
+  <p class="muted">How long a password-protected Link stays unlocked in a browser. Must be a positive whole number of seconds.</p>
+
+  <div class="actions">
+    <button class="primary" type="submit">Save settings</button>
+  </div>
+</form>
+{% endblock %}
