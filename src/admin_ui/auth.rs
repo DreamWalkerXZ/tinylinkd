@@ -68,7 +68,8 @@ impl FromRequestParts<AppState> for SessionUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let Some(token) = sessions::cookie_value(&parts.headers, sessions::SESSION_COOKIE_NAME)
+        let Some(token) =
+            crate::cookies::cookie_value(&parts.headers, sessions::SESSION_COOKIE_NAME)
         else {
             return Err(SessionRejection::Login);
         };
@@ -104,7 +105,8 @@ impl FromRequestParts<AppState> for AdminUser {
 /// The root path: send a signed-in browser to the Link list and everyone else
 /// to the login page.
 pub(super) async fn root(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let authenticated = match sessions::cookie_value(&headers, sessions::SESSION_COOKIE_NAME) {
+    let authenticated = match crate::cookies::cookie_value(&headers, sessions::SESSION_COOKIE_NAME)
+    {
         Some(token) => matches!(sessions::authenticate(&state.db, &token).await, Ok(Some(_))),
         None => false,
     };
@@ -215,7 +217,8 @@ pub(super) async fn login(
     client: ClientIp,
     form: Result<Form<LoginForm>, FormRejection>,
 ) -> Response {
-    let Some(csrf_cookie) = sessions::cookie_value(&headers, sessions::LOGIN_CSRF_COOKIE_NAME)
+    let Some(csrf_cookie) =
+        crate::cookies::cookie_value(&headers, sessions::LOGIN_CSRF_COOKIE_NAME)
     else {
         return error_page(
             StatusCode::FORBIDDEN,
@@ -265,7 +268,7 @@ pub(super) async fn login(
         }
     };
 
-    let previous_token = sessions::cookie_value(&headers, sessions::SESSION_COOKIE_NAME);
+    let previous_token = crate::cookies::cookie_value(&headers, sessions::SESSION_COOKIE_NAME);
     let created =
         match sessions::create_session(&state.db, user.id, previous_token.as_deref()).await {
             Ok(created) => created,

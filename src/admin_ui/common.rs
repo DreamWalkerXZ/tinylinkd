@@ -1,6 +1,6 @@
 use askama::Template;
 use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::app::AppState;
@@ -8,10 +8,17 @@ use crate::sessions;
 use crate::settings;
 use crate::users::{self, Role};
 
+pub(super) use crate::security_headers::html_response;
+
 const ADMIN_CSS: &str = include_str!("../../templates/admin.css");
 
 /// The number of rows shown on each Admin list page.
 pub(super) const UI_PAGE_LIMIT: i64 = 50;
+
+/// The bound used when loading Users for a `<select>` option list. Owner and
+/// invite forms need every User, and this is far above any realistic Instance
+/// size.
+pub(super) const USER_OPTIONS_LIMIT: i64 = 10_000;
 
 #[derive(Debug, Clone)]
 pub(super) struct Nav<'a> {
@@ -97,11 +104,4 @@ pub(super) fn error_page(status: StatusCode, title: &str, message: &str) -> Resp
             (status, title.to_string()).into_response()
         }
     }
-}
-
-/// Render an HTML page with the security headers required for the admin UI.
-pub(super) fn html_response(status: StatusCode, html: String) -> Response {
-    let mut response = (status, Html(html)).into_response();
-    crate::security_headers::add_html_security_headers(response.headers_mut());
-    response
 }

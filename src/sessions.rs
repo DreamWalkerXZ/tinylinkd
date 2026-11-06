@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use axum::http::HeaderMap;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sqlx::Row;
@@ -153,11 +152,6 @@ pub async fn revoke(db: &Database, session_id: i64) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Find a cookie value by name across all `Cookie` headers.
-pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    crate::cookies::cookie_value(headers, name)
-}
-
 /// An authenticated browser session.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -170,6 +164,27 @@ impl Session {
     /// Whether a submitted form token matches this session's CSRF token.
     pub fn csrf_matches(&self, submitted: &str) -> bool {
         csrf_matches(&self.csrf_token, submitted)
+    }
+}
+
+/// The rule shared by [`authenticate`] and [`is_valid`]: a session is valid
+/// only while it is unrevoked, its User is enabled, and its idle expiry is in
+/// the future.
+fn session_is_valid(
+    revoked_at: Option<&str>,
+    disabled_at: Option<&str>,
+    expires_at: &str,
+    now: time::OffsetDateTime,
+) -> bool {
+    if revoked_at.is_some() || disabled_at.is_some() {
+        return false;
+    }
+    match timeutil::parse_rfc3339(expires_at) {
+        Ok(expires_at) => expires_at > now,
+        Err(error) => {
+            tracing::error!(error = %error, "stored session expiry is not RFC 3339");
+            false
+        }
     }
 }
 
@@ -195,22 +210,18 @@ pub async fn authenticate(
     };
 
     let revoked_at: Option<String> = row.try_get("session_revoked_at")?;
-    if revoked_at.is_some() {
-        return Ok(None);
-    }
+    let disabled_at: Option<String> = row.try_get("disabled_at")?;
     let expires_at: String = row.try_get("session_expires_at")?;
-    let Ok(expires_at) = timeutil::parse_rfc3339(&expires_at) else {
-        tracing::error!("stored session expiry is not RFC 3339");
-        return Ok(None);
-    };
     let now = timeutil::now();
-    if expires_at <= now {
+    if !session_is_valid(
+        revoked_at.as_deref(),
+        disabled_at.as_deref(),
+        &expires_at,
+        now,
+    ) {
         return Ok(None);
     }
     let user = crate::users::user_from_row(&row)?;
-    if user.disabled_at.is_some() {
-        return Ok(None);
-    }
 
     let session = Session {
         id: row.try_get("session_id")?,
@@ -254,21 +265,14 @@ pub async fn is_valid(db: &Database, plaintext: &str) -> Result<bool, ApiError> 
         return Ok(false);
     };
     let revoked_at: Option<String> = row.try_get("revoked_at")?;
-    if revoked_at.is_some() {
-        return Ok(false);
-    }
     let disabled_at: Option<String> = row.try_get("disabled_at")?;
-    if disabled_at.is_some() {
-        return Ok(false);
-    }
     let expires_at: String = row.try_get("expires_at")?;
-    match timeutil::parse_rfc3339(&expires_at) {
-        Ok(expires_at) => Ok(expires_at > timeutil::now()),
-        Err(error) => {
-            tracing::error!(error = %error, "stored session expiry is not RFC 3339");
-            Ok(false)
-        }
-    }
+    Ok(session_is_valid(
+        revoked_at.as_deref(),
+        disabled_at.as_deref(),
+        &expires_at,
+        timeutil::now(),
+    ))
 }
 
 /// Process-local failed-login limiter keyed by client IP. A single-instance

@@ -486,11 +486,79 @@ async fn the_edit_form_prefills_the_current_link_values() {
     );
     assert!(body.contains("value=\"edit-link\""), "body: {body}");
     assert!(
-        body.contains("value=\"2030-01-02T03:04:05Z\""),
-        "body: {body}"
+        body.contains("value=\"2030-01-02 03:04:05\""),
+        "the expiry must be pre-filled in the Instance timezone: {body}"
     );
     assert!(body.contains("name=\"remove_password\""), "body: {body}");
     assert!(body.contains("name=\"remove_expiry\""), "body: {body}");
+}
+
+#[tokio::test]
+async fn editing_a_link_interprets_expiry_in_the_instance_timezone() {
+    let context = TestContext::new().await;
+    let admin = create_user(&context, "root", Role::Admin).await;
+    set_instance_timezone(&context, &admin, "Europe/Berlin").await;
+    let alice = create_user(&context, "alice", Role::User).await;
+    let link = tinylinkd::links::create_link_with(
+        &context.db,
+        tinylinkd::links::NewLink {
+            owner_id: alice.id,
+            destination_url: "https://example.com/old",
+            slug: Some("edit-link"),
+            password: None,
+            expires_at: Some("2030-02-02T03:04:05Z"),
+        },
+    )
+    .await
+    .expect("create Link");
+    let (session, _) = login(&context, "alice", PASSWORD).await;
+
+    let edit = get_with_cookies(
+        &context,
+        &format!("/_/links/{}/edit", link.id),
+        std::slice::from_ref(&session),
+    )
+    .await;
+    assert_eq!(edit.status, StatusCode::OK);
+    let body = String::from_utf8_lossy(&edit.body);
+    assert!(
+        body.contains("value=\"2030-02-02 04:04:05\""),
+        "the expiry must be pre-filled in the Instance timezone: {body}"
+    );
+    assert!(
+        body.contains("Europe/Berlin"),
+        "the form must name the Instance timezone: {body}"
+    );
+
+    let csrf_token = session_csrf_for(&context, &session).await;
+    let response = post_form(
+        &context,
+        &format!("/_/links/{}", link.id),
+        std::slice::from_ref(&session),
+        &[
+            ("csrf_token", &csrf_token),
+            ("destination_url", "https://example.com/old"),
+            ("slug", "edit-link"),
+            ("expires_at", "2031-05-06 07:08:09"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+
+    let updated = tinylinkd::links::find_by_id(&context.db, link.id)
+        .await
+        .expect("read Link")
+        .expect("Link exists");
+    assert_eq!(
+        updated.expires_at.as_deref(),
+        Some("2031-05-06T05:08:09Z"),
+        "the submitted local time must be stored as UTC"
+    );
 }
 
 #[tokio::test]
@@ -1009,7 +1077,7 @@ async fn creating_links_from_the_ui_is_rate_limited_per_user() {
     )
     .await;
     assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(limited.content_type(), "application/problem+json");
+    assert_eq!(limited.content_type(), "text/html; charset=utf-8");
     let retry_after = limited
         .headers
         .get(header::RETRY_AFTER)
@@ -1020,7 +1088,15 @@ async fn creating_links_from_the_ui_is_rate_limited_per_user() {
         (1..=60).contains(&seconds),
         "unexpected Retry-After: {retry_after}"
     );
-    assert_eq!(limited.json()["code"], "rate_limited");
+    let body = String::from_utf8_lossy(&limited.body);
+    assert!(
+        body.contains("The Link creation rate limit has been exceeded."),
+        "the HTML adapter must render its own rate-limit page: {body}"
+    );
+    assert!(
+        body.contains("<html"),
+        "the rate-limit response must be an HTML page: {body}"
+    );
 }
 
 #[tokio::test]

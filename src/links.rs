@@ -163,7 +163,7 @@ pub async fn create_link_with(db: &Database, new: NewLink<'_>) -> Result<Link, A
     let expires_at = new
         .expires_at
         .filter(|expires_at| !expires_at.trim().is_empty())
-        .map(normalize_expiry)
+        .map(timeutil::normalize_expiry)
         .transpose()?;
 
     match new.slug {
@@ -306,18 +306,6 @@ async fn find_by_id_on(
 pub const SLUG_RELEASE_WARNING: &str =
     "The old Slug stops working immediately and may be reused by another Link.";
 
-/// Validate a Link expiry and normalize it to RFC 3339 UTC with the `Z`
-/// designator.
-pub fn normalize_expiry(value: &str) -> Result<String, ApiError> {
-    let parsed = timeutil::parse_rfc3339(value).map_err(|_| {
-        ApiError::validation(
-            "invalid_expires_at",
-            "expires_at must be an RFC 3339 timestamp.",
-        )
-    })?;
-    Ok(timeutil::format_rfc3339(parsed))
-}
-
 #[derive(Debug, Clone)]
 pub struct LinkChanges {
     pub destination_url: Option<String>,
@@ -377,7 +365,7 @@ pub async fn update_link(
     let expires_at: Option<Option<String>> = match changes.expires_at.as_ref() {
         None => None,
         Some(None) => Some(None),
-        Some(Some(value)) => Some(Some(normalize_expiry(value)?)),
+        Some(Some(value)) => Some(Some(timeutil::normalize_expiry(value)?)),
     };
 
     let now = timeutil::now_rfc3339();

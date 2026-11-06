@@ -41,7 +41,8 @@ impl AppConfig {
         )
     }
 
-    pub fn short_url(&self, slug: &str) -> String {
+    /// The absolute short URL, including the Instance base URL.
+    pub fn absolute_short_url(&self, slug: &str) -> String {
         format!("{}/{}", self.base_url.as_str().trim_end_matches('/'), slug)
     }
 }
@@ -78,7 +79,7 @@ pub fn build_router_with_config(db: Database, config: AppConfig) -> Router {
         .merge(crate::api::router())
         .merge(crate::redirect::router())
         .fallback(fallback)
-        .layer(middleware::from_fn(add_nosniff_to_json))
+        .layer(middleware::from_fn(add_response_security_headers))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             refresh_session_cookie,
@@ -86,20 +87,29 @@ pub fn build_router_with_config(db: Database, config: AppConfig) -> Router {
         .with_state(state)
 }
 
-/// API responses are JSON or Problem Details; both must disable content-type
-/// sniffing. HTML responses set their own security headers.
-async fn add_nosniff_to_json(request: Request, next: Next) -> Response {
+/// Every response disables content-type sniffing, including API responses with
+/// no body. HTML responses add their remaining security headers separately.
+///
+/// Axum answers an unsupported method with an empty response; API clients get
+/// RFC 9457 Problem Details instead, preserving the `Allow` header.
+async fn add_response_security_headers(request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_string();
     let mut response = next.run(request).await;
-    let is_json = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value.starts_with("application/json") || value.starts_with("application/problem+json")
-        });
-    if is_json {
-        crate::security_headers::add_nosniff(response.headers_mut());
+    if path.starts_with("/_/api/") && response.status() == StatusCode::METHOD_NOT_ALLOWED {
+        let allow = response.headers().get(header::ALLOW).cloned();
+        response = ProblemDetails::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "Method Not Allowed",
+            "The HTTP method is not supported for this resource.",
+            path,
+        )
+        .into_response();
+        if let Some(allow) = allow {
+            response.headers_mut().insert(header::ALLOW, allow);
+        }
     }
+    crate::security_headers::add_nosniff(response.headers_mut());
     response
 }
 
@@ -116,7 +126,7 @@ async fn refresh_session_cookie(
     let path = request.uri().path();
     let is_admin_ui = path == "/" || (path.starts_with("/_/") && !path.starts_with("/_/api/"));
     let token = if is_admin_ui {
-        crate::sessions::cookie_value(request.headers(), crate::sessions::SESSION_COOKIE_NAME)
+        crate::cookies::cookie_value(request.headers(), crate::sessions::SESSION_COOKIE_NAME)
     } else {
         None
     };

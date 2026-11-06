@@ -1,48 +1,14 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::TestContext;
+use common::{TestContext, create_link_with_slug, create_user_with_token};
 use serde_json::json;
-use tinylinkd::tokens::create_token;
-use tinylinkd::users::{NewUser, Role, User};
-
-async fn create_user_with_token(
-    context: &TestContext,
-    username: &str,
-    role: Role,
-) -> (User, String) {
-    let user = tinylinkd::users::create_user(
-        &context.db,
-        NewUser {
-            username: username.into(),
-            email: None,
-            password: "correct horse battery staple".into(),
-            role,
-        },
-    )
-    .await
-    .expect("create user");
-    let token = create_token(&context.db, user.id, "test token", None)
-        .await
-        .expect("create token");
-    (user, token.plaintext)
-}
+use tinylinkd::users::Role;
 
 async fn create_link(context: &TestContext, token: &str, slug: &str) -> i64 {
-    let response = context
-        .post(
-            "/_/api/v1/links",
-            Some(token),
-            json!({"destination_url": "https://example.com/target", "slug": slug}),
-        )
-        .await;
-    assert_eq!(
-        response.status,
-        StatusCode::CREATED,
-        "body: {}",
-        String::from_utf8_lossy(&response.body)
-    );
-    response.json()["id"].as_i64().expect("link id")
+    create_link_with_slug(context, token, slug).await["id"]
+        .as_i64()
+        .expect("link id")
 }
 
 struct SeededClick<'a> {

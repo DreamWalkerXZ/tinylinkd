@@ -4,18 +4,20 @@ use axum::extract::rejection::FormRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use chrono_tz::Tz;
 use serde::Deserialize;
 
 use crate::analytics::{self, TimeRange};
 use crate::app::AppState;
 use crate::error::ApiError;
 use crate::links;
-use crate::problems::ProblemDetails;
 use crate::timeutil;
 use crate::users;
 
-use super::auth::SessionUser;
-use super::common::{Nav, UI_PAGE_LIMIT, error_page, html_response, load_settings_or_error};
+use super::auth::{SessionUser, require_csrf};
+use super::common::{
+    Nav, UI_PAGE_LIMIT, USER_OPTIONS_LIMIT, error_page, html_response, load_settings_or_error,
+};
 
 #[derive(Debug, Clone)]
 struct LinkRow {
@@ -134,7 +136,7 @@ pub(super) async fn link_list(
         }
     };
     let owners = if is_admin {
-        match users::list_users(&state.db, 10_000, 0).await {
+        match users::list_users(&state.db, USER_OPTIONS_LIMIT, 0).await {
             Ok((users, _)) => users
                 .into_iter()
                 .map(|user| OwnerOption {
@@ -166,7 +168,7 @@ pub(super) async fn link_list(
             } else {
                 String::new()
             };
-            let short_url = state.config.short_url(&link.slug);
+            let short_url = state.config.absolute_short_url(&link.slug);
             LinkRow::new(link, short_url, owner, instance_settings.timezone_tz())
         })
         .collect::<Vec<_>>();
@@ -319,23 +321,24 @@ pub(super) async fn create_link(
             "The form could not be read.",
         );
     };
-    if !session_user.session.csrf_matches(&form.csrf_token) {
-        return error_page(
-            StatusCode::FORBIDDEN,
-            "Forbidden",
-            "The form's CSRF token is missing or invalid.",
-        );
+    if let Some(response) = require_csrf(&session_user.session, &form.csrf_token) {
+        return response;
     }
     if let Some(retry_after) = state
         .link_create_limiter
         .check_and_record(&session_user.id())
     {
-        return ProblemDetails::rate_limited(
+        let mut response = error_page(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too Many Requests",
             "The Link creation rate limit has been exceeded.",
-            "/_/links",
-            retry_after,
-        )
-        .into_response();
+        );
+        response.headers_mut().insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_str(&retry_after.to_string())
+                .expect("a seconds value is a valid header value"),
+        );
+        return response;
     }
     let result = links::create_link_with(
         &state.db,
@@ -437,36 +440,48 @@ pub(super) async fn link_detail(
     render_link_detail(state, session_user, link_id, None).await
 }
 
+/// Load a Link for an Admin UI action, returning the appropriate error page
+/// when it does not exist or the current User may not manage it.
+async fn require_manageable_link(
+    state: &AppState,
+    session_user: &SessionUser,
+    link_id: i64,
+    action: &str,
+) -> Result<links::Link, Response> {
+    let Some(link) = (match links::find_by_id(&state.db, link_id).await {
+        Ok(link) => link,
+        Err(error) => {
+            tracing::error!(error = %error, link_id, "failed to read a Link");
+            return Err(error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "An unexpected error occurred.",
+            ));
+        }
+    }) else {
+        return Err(error_page(
+            StatusCode::NOT_FOUND,
+            "Not Found",
+            "The Link does not exist.",
+        ));
+    };
+    if !links::can_manage(&link, session_user.id(), session_user.is_admin()) {
+        let message = format!("You do not have permission to {action} this Link.");
+        return Err(error_page(StatusCode::FORBIDDEN, "Forbidden", &message));
+    }
+    Ok(link)
+}
+
 async fn render_link_detail(
     state: AppState,
     session_user: SessionUser,
     link_id: i64,
     warning: Option<&str>,
 ) -> Response {
-    let Some(link) = (match links::find_by_id(&state.db, link_id).await {
+    let link = match require_manageable_link(&state, &session_user, link_id, "view").await {
         Ok(link) => link,
-        Err(error) => {
-            tracing::error!(error = %error, link_id, "failed to read a Link");
-            return error_page(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal Server Error",
-                "An unexpected error occurred.",
-            );
-        }
-    }) else {
-        return error_page(
-            StatusCode::NOT_FOUND,
-            "Not Found",
-            "The Link does not exist.",
-        );
+        Err(response) => return response,
     };
-    if !links::can_manage(&link, session_user.id(), session_user.is_admin()) {
-        return error_page(
-            StatusCode::FORBIDDEN,
-            "Forbidden",
-            "You do not have permission to view this Link.",
-        );
-    }
     let is_admin = session_user.is_admin();
     let instance_settings = match load_settings_or_error(&state).await {
         Ok(settings) => settings,
@@ -520,7 +535,7 @@ async fn render_link_detail(
                 Vec::new()
             }
         };
-    let short_url = state.config.short_url(&link.slug);
+    let short_url = state.config.absolute_short_url(&link.slug);
     let template = LinkDetailTemplate {
         nav: Nav::new(
             &instance_settings.instance_name,
@@ -593,16 +608,39 @@ impl EditLinkForm {
             .map(|password| Some(password.to_string()))
     }
 
-    fn expiry_change(&self) -> Option<Option<String>> {
+    fn expiry_change(&self, timezone: &Tz) -> Result<Option<Option<String>>, ApiError> {
         if self.remove_expiry.is_some() {
-            return Some(None);
+            return Ok(Some(None));
         }
-        self.expires_at
+        match self
+            .expires_at
             .as_deref()
             .map(str::trim)
             .filter(|expires_at| !expires_at.is_empty())
-            .map(|expires_at| Some(expires_at.to_string()))
+        {
+            Some(expires_at) => Ok(Some(Some(parse_expiry_input(timezone, expires_at)?))),
+            None => Ok(None),
+        }
     }
+}
+
+/// Interpret an expiry entered in the admin UI and return it as RFC 3339 UTC.
+///
+/// The form shows wall-clock times in the Instance timezone, so a bare
+/// `YYYY-MM-DD HH:MM:SS` value is read in that timezone. An explicit RFC 3339
+/// timestamp is honored as written, so API-style input keeps working.
+fn parse_expiry_input(timezone: &Tz, value: &str) -> Result<String, ApiError> {
+    if let Ok(parsed) = timeutil::parse_rfc3339(value) {
+        return Ok(timeutil::format_rfc3339(parsed));
+    }
+    timeutil::parse_local_datetime(timezone, value)
+        .map(timeutil::format_rfc3339)
+        .ok_or_else(|| {
+            ApiError::validation(
+                "invalid_expires_at",
+                "expires_at must be an RFC 3339 timestamp or a YYYY-MM-DD HH:MM:SS time in the Instance timezone.",
+            )
+        })
 }
 
 #[derive(Template)]
@@ -613,7 +651,8 @@ struct EditLinkTemplate<'a> {
     csrf_token: &'a str,
     destination_url: &'a str,
     slug: &'a str,
-    expires_at: &'a str,
+    expires_at: String,
+    timezone: &'a str,
     has_password: bool,
     is_admin: bool,
     owners: Vec<OwnerOption>,
@@ -625,7 +664,7 @@ async fn owner_options(
     db: &crate::db::Database,
     selected_id: i64,
 ) -> Result<Vec<OwnerOption>, crate::error::ApiError> {
-    let (users, _) = users::list_users(db, 10_000, 0).await?;
+    let (users, _) = users::list_users(db, USER_OPTIONS_LIMIT, 0).await?;
     Ok(users
         .into_iter()
         .map(|user| OwnerOption {
@@ -641,30 +680,10 @@ pub(super) async fn edit_link_page(
     session_user: SessionUser,
     Path(link_id): Path<i64>,
 ) -> Response {
-    let Some(link) = (match links::find_by_id(&state.db, link_id).await {
+    let link = match require_manageable_link(&state, &session_user, link_id, "edit").await {
         Ok(link) => link,
-        Err(error) => {
-            tracing::error!(error = %error, link_id, "failed to read a Link");
-            return error_page(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal Server Error",
-                "An unexpected error occurred.",
-            );
-        }
-    }) else {
-        return error_page(
-            StatusCode::NOT_FOUND,
-            "Not Found",
-            "The Link does not exist.",
-        );
+        Err(response) => return response,
     };
-    if !links::can_manage(&link, session_user.id(), session_user.is_admin()) {
-        return error_page(
-            StatusCode::FORBIDDEN,
-            "Forbidden",
-            "You do not have permission to edit this Link.",
-        );
-    }
     let instance_settings = match load_settings_or_error(&state).await {
         Ok(settings) => settings,
         Err(response) => return response,
@@ -685,6 +704,7 @@ pub(super) async fn edit_link_page(
     } else {
         Vec::new()
     };
+    let timezone = instance_settings.timezone_tz();
     let template = EditLinkTemplate {
         nav: Nav::new(
             &instance_settings.instance_name,
@@ -695,7 +715,12 @@ pub(super) async fn edit_link_page(
         csrf_token: &session_user.session.csrf_token,
         destination_url: &link.destination_url,
         slug: &link.slug,
-        expires_at: link.expires_at.as_deref().unwrap_or(""),
+        expires_at: link
+            .expires_at
+            .as_deref()
+            .map(|value| timeutil::format_local_datetime(&timezone, value))
+            .unwrap_or_default(),
+        timezone: &instance_settings.timezone,
         has_password: link.has_password,
         is_admin,
         owners,
@@ -731,51 +756,37 @@ pub(super) async fn update_link(
             "The form could not be read.",
         );
     };
-    if !session_user.session.csrf_matches(&form.csrf_token) {
-        return error_page(
-            StatusCode::FORBIDDEN,
-            "Forbidden",
-            "The form's CSRF token is missing or invalid.",
-        );
+    if let Some(response) = require_csrf(&session_user.session, &form.csrf_token) {
+        return response;
     }
-    let Some(link) = (match links::find_by_id(&state.db, link_id).await {
+    let link = match require_manageable_link(&state, &session_user, link_id, "edit").await {
         Ok(link) => link,
-        Err(error) => {
-            tracing::error!(error = %error, link_id, "failed to read a Link");
-            return error_page(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal Server Error",
-                "An unexpected error occurred.",
-            );
-        }
-    }) else {
-        return error_page(
-            StatusCode::NOT_FOUND,
-            "Not Found",
-            "The Link does not exist.",
-        );
+        Err(response) => return response,
     };
-    if !links::can_manage(&link, session_user.id(), session_user.is_admin()) {
-        return error_page(
-            StatusCode::FORBIDDEN,
-            "Forbidden",
-            "You do not have permission to edit this Link.",
-        );
-    }
-    let result = links::update_link(
-        &state.db,
-        link_id,
-        session_user.id(),
-        session_user.is_admin(),
-        links::LinkChanges {
-            destination_url: Some(form.destination_url.clone()),
-            slug: Some(form.slug.trim().to_string()),
-            owner_id: form.owner_id,
-            password: form.password_change(),
-            expires_at: form.expiry_change(),
-        },
-    )
-    .await;
+    let instance_settings = match load_settings_or_error(&state).await {
+        Ok(settings) => settings,
+        Err(response) => return response,
+    };
+    let timezone = instance_settings.timezone_tz();
+    let result = match form.expiry_change(&timezone) {
+        Ok(expires_at) => {
+            links::update_link(
+                &state.db,
+                link_id,
+                session_user.id(),
+                session_user.is_admin(),
+                links::LinkChanges {
+                    destination_url: Some(form.destination_url.clone()),
+                    slug: Some(form.slug.trim().to_string()),
+                    owner_id: form.owner_id,
+                    password: form.password_change(),
+                    expires_at,
+                },
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
     match result {
         Ok(updated) => {
             render_link_detail(
@@ -803,10 +814,6 @@ pub(super) async fn update_link(
                     "An unexpected error occurred.",
                 );
             }
-            let instance_settings = match load_settings_or_error(&state).await {
-                Ok(settings) => settings,
-                Err(response) => return response,
-            };
             let is_admin = session_user.is_admin();
             let owners = if is_admin {
                 match owner_options(&state.db, form.owner_id.unwrap_or(link.owner_id)).await {
@@ -833,7 +840,8 @@ pub(super) async fn update_link(
                 csrf_token: &session_user.session.csrf_token,
                 destination_url: &form.destination_url,
                 slug: &form.slug,
-                expires_at: form.expires_at.as_deref().unwrap_or(""),
+                expires_at: form.expires_at.as_deref().unwrap_or("").to_string(),
+                timezone: &instance_settings.timezone,
                 has_password: link.has_password,
                 is_admin,
                 owners,
@@ -864,36 +872,11 @@ pub(super) async fn delete_link(
             "The form could not be read.",
         );
     };
-    if !session_user.session.csrf_matches(&form.csrf_token) {
-        return error_page(
-            StatusCode::FORBIDDEN,
-            "Forbidden",
-            "The form's CSRF token is missing or invalid.",
-        );
+    if let Some(response) = require_csrf(&session_user.session, &form.csrf_token) {
+        return response;
     }
-    let Some(link) = (match links::find_by_id(&state.db, link_id).await {
-        Ok(link) => link,
-        Err(error) => {
-            tracing::error!(error = %error, link_id, "failed to read a Link");
-            return error_page(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal Server Error",
-                "An unexpected error occurred.",
-            );
-        }
-    }) else {
-        return error_page(
-            StatusCode::NOT_FOUND,
-            "Not Found",
-            "The Link does not exist.",
-        );
-    };
-    if !links::can_manage(&link, session_user.id(), session_user.is_admin()) {
-        return error_page(
-            StatusCode::FORBIDDEN,
-            "Forbidden",
-            "You do not have permission to delete this Link.",
-        );
+    if let Err(response) = require_manageable_link(&state, &session_user, link_id, "delete").await {
+        return response;
     }
     if form.confirm.is_none() {
         return error_page(

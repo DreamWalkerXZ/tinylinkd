@@ -12,7 +12,8 @@ use crate::users;
 
 use super::auth::{AdminUser, CsrfForm, SessionUser, require_csrf};
 use super::common::{
-    Nav, PageQuery, UI_PAGE_LIMIT, error_page, html_response, load_settings_or_error, see_other,
+    Nav, PageQuery, UI_PAGE_LIMIT, USER_OPTIONS_LIMIT, error_page, html_response,
+    load_settings_or_error, see_other,
 };
 
 #[derive(Debug, Clone)]
@@ -90,7 +91,7 @@ async fn render_invites(
         }
     };
     let created_by: std::collections::HashMap<i64, String> =
-        match users::list_users(&state.db, 10_000, 0).await {
+        match users::list_users(&state.db, USER_OPTIONS_LIMIT, 0).await {
             Ok((users, _)) => users
                 .into_iter()
                 .map(|user| (user.id, user.username))

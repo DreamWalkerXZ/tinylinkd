@@ -440,20 +440,6 @@ pub async fn update_email(
     Ok(user)
 }
 
-pub async fn disable_user(db: &Database, id: i64) -> Result<(), ApiError> {
-    let now = timeutil::now_rfc3339();
-    let result = sqlx::query("UPDATE users SET disabled_at = ?, updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(&now)
-        .bind(id)
-        .execute(db.write_pool())
-        .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::not_found("User not found."));
-    }
-    Ok(())
-}
-
 fn user_owns_links(count: i64) -> ApiError {
     let noun = if count == 1 { "Link" } else { "Links" };
     ApiError::conflict(

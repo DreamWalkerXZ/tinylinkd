@@ -2,45 +2,11 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
-use common::{TestContext, TestResponse};
+use common::{TestContext, TestResponse, create_link, create_user_with_token};
 use serde_json::{Value, json};
-use tinylinkd::tokens::create_token;
-use tinylinkd::users::{NewUser, Role, User};
+use tinylinkd::users::Role;
 
 const BASE_URL: &str = "http://localhost:8080";
-
-async fn create_user_with_token(
-    context: &TestContext,
-    username: &str,
-    role: Role,
-) -> (User, String) {
-    let user = tinylinkd::users::create_user(
-        &context.db,
-        NewUser {
-            username: username.into(),
-            email: None,
-            password: "correct horse battery staple".into(),
-            role,
-        },
-    )
-    .await
-    .expect("create user");
-    let token = create_token(&context.db, user.id, "test token", None)
-        .await
-        .expect("create token");
-    (user, token.plaintext)
-}
-
-async fn create_link(context: &TestContext, token: &str, body: Value) -> Value {
-    let response = context.post("/_/api/v1/links", Some(token), body).await;
-    assert_eq!(
-        response.status,
-        StatusCode::CREATED,
-        "body: {}",
-        String::from_utf8_lossy(&response.body)
-    );
-    response.json()
-}
 
 async fn patch_link(context: &TestContext, token: &str, link_id: i64, body: Value) -> TestResponse {
     context

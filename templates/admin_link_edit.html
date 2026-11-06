@@ -60,9 +60,9 @@
 
   <fieldset>
     <legend>Expiry</legend>
-    <p class="muted">An RFC 3339 UTC timestamp. Leave the field unchanged to keep the current expiry.</p>
+    <p class="muted">A time in the Instance timezone ({{ timezone }}), as YYYY-MM-DD HH:MM:SS. An RFC 3339 timestamp is also accepted. Leave the field unchanged to keep the current expiry.</p>
     <label for="expires_at">Expires at</label>
-    <input id="expires_at" name="expires_at" type="text" value="{{ expires_at }}" placeholder="2030-01-02T03:04:05Z">
+    <input id="expires_at" name="expires_at" type="text" value="{{ expires_at }}" placeholder="2030-01-02 03:04:05">
     {% match errors.expires_at %}
     {% when Some with (message) %}
     <p class="error" id="expires_at_error" role="alert">{{ message }}</p>

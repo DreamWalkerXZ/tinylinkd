@@ -1,35 +1,12 @@
 mod common;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use common::{TEST_PEER, TestContext};
-use serde_json::{Value, json};
+use common::{TEST_PEER, TestContext, create_link, create_user_with_token};
+use serde_json::json;
 use sqlx::Row;
-use tinylinkd::tokens::create_token;
-use tinylinkd::users::{NewUser, Role, User};
+use tinylinkd::users::Role;
 
 const BASE_URL: &str = "http://localhost:8080";
-
-async fn create_user_with_token(
-    context: &TestContext,
-    username: &str,
-    role: Role,
-) -> (User, String) {
-    let user = tinylinkd::users::create_user(
-        &context.db,
-        NewUser {
-            username: username.into(),
-            email: None,
-            password: "correct horse battery staple".into(),
-            role,
-        },
-    )
-    .await
-    .expect("create user");
-    let token = create_token(&context.db, user.id, "test token", None)
-        .await
-        .expect("create token");
-    (user, token.plaintext)
-}
 
 fn browser_headers(user_agent: &str, referer: Option<&str>) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -73,17 +50,6 @@ async fn stored_clicks(context: &TestContext) -> Vec<StoredClick> {
             is_bot: row.try_get("is_bot").expect("is_bot"),
         })
         .collect()
-}
-
-async fn create_link(context: &TestContext, token: &str, body: Value) -> Value {
-    let response = context.post("/_/api/v1/links", Some(token), body).await;
-    assert_eq!(
-        response.status,
-        StatusCode::CREATED,
-        "body: {}",
-        String::from_utf8_lossy(&response.body)
-    );
-    response.json()
 }
 
 #[tokio::test]
