@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use axum::http::HeaderMap;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
@@ -125,11 +124,6 @@ pub fn set_cookie_header(link_id: i64, value: &str, secure: bool, max_age_second
         header.push_str("; Secure");
     }
     header
-}
-
-/// Find a Link's unlock cookie in the request's `Cookie` headers.
-pub fn cookie_from_headers(headers: &HeaderMap, link_id: i64) -> Option<String> {
-    crate::cookies::cookie_value(headers, &cookie_name(link_id))
 }
 
 /// Process-local failed-password rate limiter keyed by client IP and Link.

@@ -10,6 +10,8 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tinylinkd::app::{AppConfig, build_router, build_router_with_config};
 use tinylinkd::db::Database;
+use tinylinkd::tokens::create_token;
+use tinylinkd::users::{NewUser, Role, User};
 use tower::ServiceExt;
 
 /// The socket peer address attached to every test request. Production
@@ -144,4 +146,49 @@ impl TestResponse {
             )
         })
     }
+}
+
+/// Create a User directly in the database and an API token for them.
+pub async fn create_user_with_token(
+    context: &TestContext,
+    username: &str,
+    role: Role,
+) -> (User, String) {
+    let user = tinylinkd::users::create_user(
+        &context.db,
+        NewUser {
+            username: username.into(),
+            email: None,
+            password: "correct horse battery staple".into(),
+            role,
+        },
+    )
+    .await
+    .expect("create user");
+    let token = create_token(&context.db, user.id, "test token", None)
+        .await
+        .expect("create token");
+    (user, token.plaintext)
+}
+
+/// Create a Link through the API and return its JSON body.
+pub async fn create_link(context: &TestContext, token: &str, body: Value) -> Value {
+    let response = context.post("/_/api/v1/links", Some(token), body).await;
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "body: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    response.json()
+}
+
+/// Create a Link with `slug` and a fixed Destination URL.
+pub async fn create_link_with_slug(context: &TestContext, token: &str, slug: &str) -> Value {
+    create_link(
+        context,
+        token,
+        serde_json::json!({"destination_url": "https://example.com/destination", "slug": slug}),
+    )
+    .await
 }

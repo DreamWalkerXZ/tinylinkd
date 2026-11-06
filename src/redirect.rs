@@ -79,7 +79,7 @@ async fn respond(
 /// Whether the request carries a valid unlock cookie for this Link's current
 /// password version.
 async fn is_unlocked(state: &AppState, link: &Link, headers: &HeaderMap) -> bool {
-    let Some(cookie) = unlock::cookie_from_headers(headers, link.id) else {
+    let Some(cookie) = crate::cookies::cookie_value(headers, &unlock::cookie_name(link.id)) else {
         return false;
     };
     let secret = match secrets::unlock_cookie_signing_key(&state.db).await {
@@ -259,7 +259,7 @@ async fn unlock(
     let mut response = StatusCode::SEE_OTHER.into_response();
     response.headers_mut().insert(
         header::LOCATION,
-        HeaderValue::from_str(&short_url(&slug, query))
+        HeaderValue::from_str(&root_relative_short_url(&slug, query))
             .expect("a Slug and query are a valid Location"),
     );
     response.headers_mut().insert(
@@ -273,15 +273,15 @@ fn redirect_to_short_url(slug: &str, query: Option<&str>) -> Response {
     let mut response = StatusCode::SEE_OTHER.into_response();
     response.headers_mut().insert(
         header::LOCATION,
-        HeaderValue::from_str(&short_url(slug, query))
+        HeaderValue::from_str(&root_relative_short_url(slug, query))
             .expect("a Slug and query are a valid Location"),
     );
     response
 }
 
-/// The short URL to continue to after an unlock, carrying the original query
-/// string so it reaches the Destination URL.
-fn short_url(slug: &str, query: Option<&str>) -> String {
+/// The root-relative short URL to continue to after an unlock, carrying the
+/// original query string so it reaches the Destination URL.
+fn root_relative_short_url(slug: &str, query: Option<&str>) -> String {
     match query.filter(|query| !query.is_empty()) {
         Some(query) => format!("/{slug}?{query}"),
         None => format!("/{slug}"),

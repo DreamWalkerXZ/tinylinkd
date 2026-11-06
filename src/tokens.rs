@@ -42,19 +42,6 @@ fn normalize_name(name: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
-fn normalize_expiry(expires_at: Option<&str>) -> Result<Option<String>, ApiError> {
-    let Some(expires_at) = expires_at else {
-        return Ok(None);
-    };
-    let parsed = timeutil::parse_rfc3339(expires_at).map_err(|_| {
-        ApiError::validation(
-            "invalid_expires_at",
-            "expires_at must be an RFC 3339 timestamp.",
-        )
-    })?;
-    Ok(Some(timeutil::format_rfc3339(parsed)))
-}
-
 pub async fn create_token(
     db: &Database,
     user_id: i64,
@@ -62,7 +49,7 @@ pub async fn create_token(
     expires_at: Option<&str>,
 ) -> Result<CreatedToken, ApiError> {
     let name = normalize_name(name)?;
-    let expires_at = normalize_expiry(expires_at)?;
+    let expires_at = expires_at.map(timeutil::normalize_expiry).transpose()?;
 
     let user = sqlx::query("SELECT disabled_at FROM users WHERE id = ?")
         .bind(user_id)

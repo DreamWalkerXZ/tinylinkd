@@ -177,6 +177,12 @@ pub fn validate_base_url(value: &str) -> Result<Url> {
     if url.host_str().is_none() {
         bail!("TLD_BASE_URL must include a host");
     }
+    if url.query().is_some() {
+        bail!("TLD_BASE_URL must not include a query string");
+    }
+    if url.fragment().is_some() {
+        bail!("TLD_BASE_URL must not include a fragment");
+    }
     Ok(url)
 }
 
@@ -188,14 +194,28 @@ mod tests {
     fn accepts_absolute_http_and_https_base_urls() {
         assert!(validate_base_url("http://localhost:8080").is_ok());
         assert!(validate_base_url("https://tld.example.com").is_ok());
-        assert!(validate_base_url("https://example.com/?x=1").is_ok());
-        assert!(validate_base_url("https://example.com/#x").is_ok());
+        assert!(validate_base_url("https://example.com/base").is_ok());
     }
 
     #[test]
     fn rejects_non_http_base_urls() {
         assert!(validate_base_url("ftp://example.com").is_err());
         assert!(validate_base_url("not a url").is_err());
+    }
+
+    #[test]
+    fn rejects_base_urls_with_a_query_or_fragment() {
+        let query = validate_base_url("https://example.com/?x=1").expect_err("query is rejected");
+        assert!(
+            query.to_string().contains("query"),
+            "unexpected error: {query:#}"
+        );
+        let fragment =
+            validate_base_url("https://example.com/#x").expect_err("fragment is rejected");
+        assert!(
+            fragment.to_string().contains("fragment"),
+            "unexpected error: {fragment:#}"
+        );
     }
 
     #[test]

@@ -2,49 +2,9 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
-use common::{TestContext, TestResponse};
+use common::{TestContext, TestResponse, create_link_with_slug, create_user_with_token};
 use serde_json::{Value, json};
-use tinylinkd::tokens::create_token;
-use tinylinkd::users::{NewUser, Role, User};
-
-async fn create_user_with_token(
-    context: &TestContext,
-    username: &str,
-    role: Role,
-) -> (User, String) {
-    let user = tinylinkd::users::create_user(
-        &context.db,
-        NewUser {
-            username: username.into(),
-            email: None,
-            password: "correct horse battery staple".into(),
-            role,
-        },
-    )
-    .await
-    .expect("create user");
-    let token = create_token(&context.db, user.id, "test token", None)
-        .await
-        .expect("create token");
-    (user, token.plaintext)
-}
-
-async fn create_link(context: &TestContext, token: &str, slug: &str) -> Value {
-    let response = context
-        .post(
-            "/_/api/v1/links",
-            Some(token),
-            json!({"destination_url": "https://example.com/destination", "slug": slug}),
-        )
-        .await;
-    assert_eq!(
-        response.status,
-        StatusCode::CREATED,
-        "body: {}",
-        String::from_utf8_lossy(&response.body)
-    );
-    response.json()
-}
+use tinylinkd::users::Role;
 
 async fn patch_link(context: &TestContext, token: &str, link_id: i64, body: Value) -> TestResponse {
     context
@@ -178,7 +138,7 @@ async fn api_link_creation_accepts_an_expiry_like_the_ui_and_normalizes_it_to_ut
 async fn owner_sets_extends_and_clears_the_link_expiry() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
-    let link = create_link(&context, &token, "scheduled").await;
+    let link = create_link_with_slug(&context, &token, "scheduled").await;
     let id = link_id(&link);
     let uri = format!("/_/api/v1/links/{id}");
 
@@ -251,7 +211,7 @@ async fn owner_sets_extends_and_clears_the_link_expiry() {
 async fn expired_links_serve_a_410_page_and_record_no_click() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
-    let link = create_link(&context, &token, "expired-link").await;
+    let link = create_link_with_slug(&context, &token, "expired-link").await;
     let id = link_id(&link);
 
     let active = context.get("/expired-link", None).await;
@@ -306,7 +266,7 @@ async fn expired_links_serve_a_410_page_and_record_no_click() {
 async fn expiry_is_stored_and_returned_in_utc() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
-    let link = create_link(&context, &token, "time-zoned").await;
+    let link = create_link_with_slug(&context, &token, "time-zoned").await;
     let id = link_id(&link);
     let uri = format!("/_/api/v1/links/{id}");
 
@@ -342,7 +302,7 @@ async fn expiry_is_stored_and_returned_in_utc() {
 async fn invalid_expiries_return_422_problem_details_and_change_nothing() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
-    let link = create_link(&context, &token, "valid-expiry").await;
+    let link = create_link_with_slug(&context, &token, "valid-expiry").await;
     let id = link_id(&link);
     let uri = format!("/_/api/v1/links/{id}");
 
@@ -393,7 +353,7 @@ async fn invalid_expiries_return_422_problem_details_and_change_nothing() {
 async fn an_expired_password_protected_link_returns_410_not_the_password_form() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
-    let link = create_link(&context, &token, "guarded").await;
+    let link = create_link_with_slug(&context, &token, "guarded").await;
     let id = link_id(&link);
 
     let protected = patch_link(&context, &token, id, json!({"password": "open sesame"})).await;
@@ -487,9 +447,9 @@ async fn an_expired_password_protected_link_returns_410_not_the_password_form() 
 async fn expired_links_stay_listed_and_keep_their_slug() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
-    let expired = create_link(&context, &token, "kept-slug").await;
+    let expired = create_link_with_slug(&context, &token, "kept-slug").await;
     let expired_id = link_id(&expired);
-    let active = create_link(&context, &token, "active-slug").await;
+    let active = create_link_with_slug(&context, &token, "active-slug").await;
     let active_id = link_id(&active);
 
     patch_link(
@@ -590,7 +550,7 @@ async fn expired_links_stay_listed_and_keep_their_slug() {
 async fn expiry_boundaries_follow_expired_at_or_before_now() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
-    let id = link_id(&create_link(&context, &token, "boundary").await);
+    let id = link_id(&create_link_with_slug(&context, &token, "boundary").await);
     let now = time::OffsetDateTime::now_utc();
     let format = |instant: time::OffsetDateTime| {
         instant
@@ -644,7 +604,7 @@ async fn expiry_boundaries_follow_expired_at_or_before_now() {
 async fn the_status_filter_agrees_with_the_link_status_at_the_boundary() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
-    let id = link_id(&create_link(&context, &token, "same-second").await);
+    let id = link_id(&create_link_with_slug(&context, &token, "same-second").await);
     let now = time::OffsetDateTime::now_utc();
     let whole_second = now.replace_nanosecond(0).expect("a valid timestamp");
     let expiry = whole_second
@@ -681,7 +641,7 @@ async fn only_the_owner_or_an_admin_can_set_the_expiry() {
     let (_, alice_token) = create_user_with_token(&context, "alice", Role::User).await;
     let (_, bob_token) = create_user_with_token(&context, "bob", Role::User).await;
     let (_, admin_token) = create_user_with_token(&context, "admin", Role::Admin).await;
-    let link = create_link(&context, &alice_token, "alice-link").await;
+    let link = create_link_with_slug(&context, &alice_token, "alice-link").await;
     let id = link_id(&link);
     let uri = format!("/_/api/v1/links/{id}");
 
@@ -732,7 +692,7 @@ async fn only_the_owner_or_an_admin_can_set_the_expiry() {
 async fn combined_edits_apply_the_expiry_with_the_other_fields() {
     let context = TestContext::new().await;
     let (_, token) = create_user_with_token(&context, "alice", Role::User).await;
-    let link = create_link(&context, &token, "combo").await;
+    let link = create_link_with_slug(&context, &token, "combo").await;
     let id = link_id(&link);
 
     let combined = patch_link(

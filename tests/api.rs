@@ -1,6 +1,6 @@
 mod common;
 
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode, header};
 use common::TestContext;
 use serde_json::json;
 use tinylinkd::bootstrap::{BootstrapAdmin, bootstrap_admin};
@@ -72,6 +72,75 @@ async fn json_and_problem_responses_disable_content_type_sniffing() {
             .and_then(|value| value.to_str().ok());
         assert_eq!(nosniff, Some("nosniff"), "missing nosniff on {uri}");
     }
+}
+
+#[tokio::test]
+async fn every_api_response_disables_content_type_sniffing_including_no_content() {
+    let context = TestContext::new().await;
+    let admin = bootstrap_test_admin(&context).await;
+    let admin_token = create_token(&context.db, admin.id, "admin cli", None)
+        .await
+        .expect("admin token");
+    let revocable = create_token(&context.db, admin.id, "revocable", None)
+        .await
+        .expect("revocable token");
+
+    let response = context
+        .delete(
+            &format!("/_/api/v1/tokens/{}", revocable.id),
+            Some(&admin_token.plaintext),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        response
+            .headers
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff"),
+        "a 204 API response must still disable content-type sniffing"
+    );
+}
+
+#[tokio::test]
+async fn unsupported_api_methods_return_problem_details_with_allow() {
+    let context = TestContext::new().await;
+    let admin = bootstrap_test_admin(&context).await;
+    let token = create_token(&context.db, admin.id, "admin cli", None)
+        .await
+        .expect("admin token");
+
+    let response = context
+        .request(
+            Method::PUT,
+            "/_/api/v1/links/1",
+            Some(&token.plaintext),
+            Some(json!({})),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.content_type(), "application/problem+json");
+    let problem = response.json();
+    assert_eq!(problem["status"], 405);
+    assert_eq!(problem["code"], "method_not_allowed");
+    assert_eq!(problem["instance"], "/_/api/v1/links/1");
+    assert_eq!(
+        response
+            .headers
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    let allow = response
+        .headers
+        .get(header::ALLOW)
+        .and_then(|value| value.to_str().ok())
+        .expect("Allow header");
+    assert!(allow.contains("GET"), "unexpected Allow header: {allow}");
+    assert!(allow.contains("PATCH"), "unexpected Allow header: {allow}");
+    assert!(allow.contains("DELETE"), "unexpected Allow header: {allow}");
 }
 
 #[tokio::test]
@@ -495,8 +564,12 @@ async fn invalid_token_payloads_return_validation_problem_details() {
 }
 
 #[tokio::test]
-async fn api_tokens_of_disabled_users_are_rejected() {
+async fn api_tokens_of_users_disabled_through_the_api_are_rejected() {
     let context = TestContext::new().await;
+    let admin = bootstrap_test_admin(&context).await;
+    let admin_token = create_token(&context.db, admin.id, "admin cli", None)
+        .await
+        .expect("admin token");
     let bob = tinylinkd::users::create_user(
         &context.db,
         tinylinkd::users::NewUser {
@@ -512,9 +585,16 @@ async fn api_tokens_of_disabled_users_are_rejected() {
         .await
         .expect("bob token");
 
-    tinylinkd::users::disable_user(&context.db, bob.id)
-        .await
-        .expect("disable bob");
+    let disabled = context
+        .request(
+            Method::PATCH,
+            &format!("/_/api/v1/users/{}", bob.id),
+            Some(&admin_token.plaintext),
+            Some(json!({ "disabled": true })),
+        )
+        .await;
+    assert_eq!(disabled.status, StatusCode::OK);
+    assert_eq!(disabled.json()["disabled"], true);
 
     let response = context
         .get("/_/api/v1/me", Some(&bob_token.plaintext))
@@ -522,7 +602,7 @@ async fn api_tokens_of_disabled_users_are_rejected() {
 
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
     assert_eq!(response.content_type(), "application/problem+json");
-    assert_eq!(response.json()["code"], "user_disabled");
+    assert_eq!(response.json()["code"], "token_revoked");
 }
 
 #[tokio::test]

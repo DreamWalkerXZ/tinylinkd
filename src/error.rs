@@ -18,7 +18,85 @@ pub enum ApiError {
     Internal(String),
 }
 
+/// The HTTP and form-facing metadata for an [`ApiError`].
+///
+/// Every boundary reads its status, Problem Details code and title, form error
+/// code, and client-facing detail from the same place, so a new variant cannot
+/// drift between the JSON API and the Admin UI.
+struct ErrorMetadata<'a> {
+    status: StatusCode,
+    problem_code: &'static str,
+    /// The code exposed to form handlers that place a message next to a field;
+    /// `None` for errors that belong in a general form message.
+    form_code: Option<&'static str>,
+    title: &'static str,
+    /// The detail to show API clients and forms. Internal errors set this too
+    /// so `Display` can show it, but [`ApiError::into_problem`] hides it.
+    detail: Option<&'a str>,
+}
+
 impl ApiError {
+    fn metadata(&self) -> ErrorMetadata<'_> {
+        match self {
+            Self::Unauthorized { code, detail } => ErrorMetadata {
+                status: StatusCode::UNAUTHORIZED,
+                problem_code: code,
+                form_code: Some(code),
+                title: "Unauthorized",
+                detail: Some(detail),
+            },
+            Self::Validation { code, detail } => ErrorMetadata {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                problem_code: code,
+                form_code: Some(code),
+                title: "Unprocessable Entity",
+                detail: Some(detail),
+            },
+            Self::Forbidden { detail } => ErrorMetadata {
+                status: StatusCode::FORBIDDEN,
+                problem_code: "forbidden",
+                form_code: None,
+                title: "Forbidden",
+                detail: Some(detail),
+            },
+            Self::Conflict { code, detail } => ErrorMetadata {
+                status: StatusCode::CONFLICT,
+                problem_code: code,
+                form_code: Some(code),
+                title: "Conflict",
+                detail: Some(detail),
+            },
+            Self::Gone { code, detail } => ErrorMetadata {
+                status: StatusCode::GONE,
+                problem_code: code,
+                form_code: Some(code),
+                title: "Gone",
+                detail: Some(detail),
+            },
+            Self::NotFound { detail } => ErrorMetadata {
+                status: StatusCode::NOT_FOUND,
+                problem_code: "not_found",
+                form_code: None,
+                title: "Not Found",
+                detail: Some(detail),
+            },
+            Self::Database(_) => ErrorMetadata {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                problem_code: "internal_error",
+                form_code: None,
+                title: "Internal Server Error",
+                detail: None,
+            },
+            Self::Internal(detail) => ErrorMetadata {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                problem_code: "internal_error",
+                form_code: None,
+                title: "Internal Server Error",
+                detail: Some(detail),
+            },
+        }
+    }
+
     pub fn unauthorized(code: &'static str, detail: impl Into<String>) -> Self {
         Self::Unauthorized {
             code,
@@ -64,74 +142,40 @@ impl ApiError {
     }
 
     pub fn status(&self) -> StatusCode {
-        match self {
-            Self::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
-            Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Forbidden { .. } => StatusCode::FORBIDDEN,
-            Self::Conflict { .. } => StatusCode::CONFLICT,
-            Self::Gone { .. } => StatusCode::GONE,
-            Self::NotFound { .. } => StatusCode::NOT_FOUND,
-            Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
+        self.metadata().status
     }
 
     /// The machine-readable code, when this error has one. The admin UI uses
     /// it to place a validation message next to the offending form field.
     pub fn code(&self) -> Option<&'static str> {
-        match self {
-            Self::Unauthorized { code, .. }
-            | Self::Validation { code, .. }
-            | Self::Conflict { code, .. }
-            | Self::Gone { code, .. } => Some(code),
-            Self::Forbidden { .. }
-            | Self::NotFound { .. }
-            | Self::Database(_)
-            | Self::Internal(_) => None,
-        }
+        self.metadata().form_code
     }
 
     pub fn into_problem(self, instance: &str) -> ProblemDetails {
-        let status = self.status();
-        match self {
-            Self::Unauthorized { code, detail } => {
-                ProblemDetails::unauthorized(code, detail, instance)
+        let metadata = self.metadata();
+        if metadata.status.is_server_error() {
+            match &self {
+                Self::Database(error) => tracing::error!(error = %error, "database error"),
+                Self::Internal(detail) => tracing::error!(detail = %detail, "internal error"),
+                _ => {}
             }
-            Self::Validation { code, detail } => {
-                ProblemDetails::new(status, code, "Unprocessable Entity", detail, instance)
-            }
-            Self::Forbidden { detail } => {
-                ProblemDetails::new(status, "forbidden", "Forbidden", detail, instance)
-            }
-            Self::Conflict { code, detail } => {
-                ProblemDetails::new(status, code, "Conflict", detail, instance)
-            }
-            Self::Gone { code, detail } => {
-                ProblemDetails::new(status, code, "Gone", detail, instance)
-            }
-            Self::NotFound { detail } => ProblemDetails::not_found(detail, instance),
-            Self::Database(error) => {
-                tracing::error!(error = %error, "database error");
-                ProblemDetails::internal_error(instance)
-            }
-            Self::Internal(detail) => {
-                tracing::error!(detail = %detail, "internal error");
-                ProblemDetails::internal_error(instance)
-            }
+            return ProblemDetails::internal_error(instance);
         }
+        ProblemDetails::new(
+            metadata.status,
+            metadata.problem_code,
+            metadata.title,
+            metadata.detail.unwrap_or_default(),
+            instance,
+        )
     }
 }
 
 impl fmt::Display for ApiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unauthorized { detail, .. }
-            | Self::Validation { detail, .. }
-            | Self::Forbidden { detail }
-            | Self::Conflict { detail, .. }
-            | Self::Gone { detail, .. }
-            | Self::NotFound { detail } => formatter.write_str(detail),
             Self::Database(error) => write!(formatter, "database error: {error}"),
-            Self::Internal(detail) => formatter.write_str(detail),
+            _ => formatter.write_str(self.metadata().detail.unwrap_or_default()),
         }
     }
 }

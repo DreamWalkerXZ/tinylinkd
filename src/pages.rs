@@ -1,6 +1,8 @@
 use askama::Template;
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
+
+use crate::security_headers::html_response;
 
 #[derive(Template)]
 #[template(path = "not_found.html")]
@@ -45,9 +47,9 @@ pub fn expired(slug: &str) -> Response {
 }
 
 /// Render the public password form. Callers choose the status: 200 for the
-/// initial form, 401 after a wrong password, or 429 when rate-limited.
-/// Render the public password form. The query string of the short URL is
-/// carried into the form action so it survives the unlock round trip.
+/// initial form, 401 after a wrong password, or 429 when rate-limited. The
+/// query string of the short URL is carried into the form action so it
+/// survives the unlock round trip.
 pub fn password_form(
     status: StatusCode,
     slug: &str,
@@ -61,10 +63,4 @@ pub fn password_form(
             (status, "Password required").into_response()
         }
     }
-}
-
-fn html_response(status: StatusCode, html: String) -> Response {
-    let mut response = (status, Html(html)).into_response();
-    crate::security_headers::add_html_security_headers(response.headers_mut());
-    response
 }

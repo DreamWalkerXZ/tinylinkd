@@ -2,34 +2,11 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
-use common::{TestContext, TestResponse};
+use common::{TestContext, TestResponse, create_link_with_slug, create_user_with_token};
 use serde_json::{Value, json};
-use tinylinkd::tokens::create_token;
-use tinylinkd::users::{NewUser, Role, User};
+use tinylinkd::users::Role;
 
 const SETTINGS_URI: &str = "/_/api/v1/settings";
-
-async fn create_user_with_token(
-    context: &TestContext,
-    username: &str,
-    role: Role,
-) -> (User, String) {
-    let user = tinylinkd::users::create_user(
-        &context.db,
-        NewUser {
-            username: username.into(),
-            email: None,
-            password: "correct horse battery staple".into(),
-            role,
-        },
-    )
-    .await
-    .expect("create user");
-    let token = create_token(&context.db, user.id, "test token", None)
-        .await
-        .expect("create token");
-    (user, token.plaintext)
-}
 
 async fn ensure_admin_token(context: &TestContext) -> String {
     create_user_with_token(context, "admin", Role::Admin)
@@ -56,25 +33,8 @@ fn defaults() -> Value {
     })
 }
 
-async fn create_link(context: &TestContext, token: &str, slug: &str) -> Value {
-    let response = context
-        .post(
-            "/_/api/v1/links",
-            Some(token),
-            json!({"destination_url": "https://example.com/destination", "slug": slug}),
-        )
-        .await;
-    assert_eq!(
-        response.status,
-        StatusCode::CREATED,
-        "body: {}",
-        String::from_utf8_lossy(&response.body)
-    );
-    response.json()
-}
-
 async fn protect_link(context: &TestContext, token: &str, slug: &str, password: &str) -> i64 {
-    let link = create_link(context, token, slug).await;
+    let link = create_link_with_slug(context, token, slug).await;
     let id = link["id"].as_i64().expect("link id");
     let response = context
         .request(
@@ -395,7 +355,7 @@ async fn unlock_cookie_max_age_follows_the_ttl_setting() {
 async fn click_retention_cleanup_uses_the_configured_days() {
     let context = TestContext::new().await;
     let token = ensure_admin_token(&context).await;
-    let link = create_link(&context, &token, "retention-link").await;
+    let link = create_link_with_slug(&context, &token, "retention-link").await;
     let link_id = link["id"].as_i64().expect("link id");
     let now = fixed_now("2026-06-01T00:00:00Z");
 
@@ -450,7 +410,7 @@ async fn click_retention_cleanup_uses_the_configured_days() {
 async fn daily_stats_bucket_in_the_instance_timezone() {
     let context = TestContext::new().await;
     let token = ensure_admin_token(&context).await;
-    let link = create_link(&context, &token, "timezone-link").await;
+    let link = create_link_with_slug(&context, &token, "timezone-link").await;
     let link_id = link["id"].as_i64().expect("link id");
 
     let configured =
@@ -494,7 +454,7 @@ async fn daily_stats_bucket_in_the_instance_timezone() {
 async fn daily_stats_handle_dst_transitions() {
     let context = TestContext::new().await;
     let token = ensure_admin_token(&context).await;
-    let link = create_link(&context, &token, "dst-link").await;
+    let link = create_link_with_slug(&context, &token, "dst-link").await;
     let link_id = link["id"].as_i64().expect("link id");
 
     let configured =

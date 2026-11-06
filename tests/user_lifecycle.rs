@@ -1,34 +1,12 @@
 mod common;
 
 use axum::http::{Method, StatusCode};
-use common::{TestContext, TestResponse};
+use common::{TestContext, TestResponse, create_user_with_token};
 use serde_json::{Value, json};
 use tinylinkd::tokens::create_token;
-use tinylinkd::users::{NewUser, Role, User};
+use tinylinkd::users::{NewUser, Role};
 
 const PASSWORD: &str = "correct horse battery staple";
-
-async fn create_user_with_token(
-    context: &TestContext,
-    username: &str,
-    role: Role,
-) -> (User, String) {
-    let user = tinylinkd::users::create_user(
-        &context.db,
-        NewUser {
-            username: username.into(),
-            email: None,
-            password: PASSWORD.into(),
-            role,
-        },
-    )
-    .await
-    .expect("create user");
-    let token = create_token(&context.db, user.id, "test token", None)
-        .await
-        .expect("create token");
-    (user, token.plaintext)
-}
 
 async fn request(
     context: &TestContext,
